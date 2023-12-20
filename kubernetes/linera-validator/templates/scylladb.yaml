@@ -14,6 +14,44 @@ spec:
 
 ---
 
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ensure-aio-max-nr
+data:
+  # If you're not on Linux, Docker will spin up a Linux VM to run Linux containers
+  # All containers (regardless of what clusters they're in) will share the same Linux VM kernel
+  # Because of that, when we're running with kind clusters, we'll need to alter
+  # aio-max-nr to make sure it can handle multiple scyllaDB instances (for multiple Validators
+  # running locally in parallel)
+  # Each ScyllaDB instance seems to request 510260 of AIO, so setting this to 8 * 510260
+  # so we have some buffer
+  # OTOH, if you _are_ on Linux, this won't succeed as it would require root privileges
+
+  ensure-aio-max-nr.sh: |
+    #!/bin/sh
+    nr=$(cat /proc/sys/fs/aio-max-nr)
+    target="$1"
+
+    [ "$nr" -ge "$1" ] && exit 0
+    echo "aio-max-nr is too small to run ScyllaDB (less than $1): attempting to increase"
+
+    echo "$1" > /proc/sys/fs/aio-max-nr && exit 0
+
+    echo "Failed to increase \`aio-max-nr\`."
+    echo
+    echo "Please increase it yourself:"
+    echo "  echo "$1" | sudo tee /proc/sys/fs/aio-max-nr"
+    echo "or update \`/etc/sysctl.conf\` to persist the change:"
+    echo "  echo fs.aio-max-nr = $1" | sudo tee -a /etc/sysctl.conf
+    echo "  sudo sysctl -p /etc/sysctl.conf"
+    echo
+    echo "See ScyllaDB documentation at https://university.scylladb.com/courses/data-modeling/lessons/basic-data-modeling-2/topic/keyspace/"
+    echo "for more information."
+
+    exit 1
+---
+
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -29,20 +67,16 @@ spec:
       labels:
         app: scylladb
     spec:
-      # If you're not on Linux, Docker will spin up a Linux VM to run Linux containers
-      # All containers (regardless of what clusters they're in) will share the same Linux VM kernel
-      # Because of that, when we're running with kind clusters, we'll need to alter
-      # aio-max-nr to make sure it can handle multiple scyllaDB instances (for multiple Validators
-      # running locally in parallel)
-      # Each ScyllaDB instance seems to request 510260 of AIO, so setting this to 8 * 510260
-      # so we have some buffer
       initContainers:
       {{- if eq .Values.environment "kind" }}
-      - name: increase-aio-max-nr
+      - name: ensure-aio-max-nr
         image: busybox
-        command: ['sh', '-c', 'echo 4082080 > /proc/sys/fs/aio-max-nr']
+        command: ['sh', '/opt/ensure-aio-max-nr/ensure-aio-max-nr.sh', '4082080']
         securityContext:
           privileged: true
+        volumeMounts:
+        - name: ensure-aio-max-nr
+          mountPath: /opt/ensure-aio-max-nr
       {{- end }}
       containers:
         - name: scylladb
@@ -56,6 +90,11 @@ spec:
       volumes:
         - name: scylladb-config
           emptyDir: {}
+        - name: ensure-aio-max-nr
+          configMap:
+            name: ensure-aio-max-nr
+            defaultMode: 0777
+
 
   volumeClaimTemplates:
     - metadata:
