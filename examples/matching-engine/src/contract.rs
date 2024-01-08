@@ -14,7 +14,7 @@ use std::cmp::min;
 use async_trait::async_trait;
 use fungible::{Account, AccountOwner, Destination, FungibleTokenAbi};
 use linera_sdk::{
-    base::{Amount, ApplicationId, SessionId, WithContractAbi},
+    base::{Amount, ApplicationId, Owner, SessionId, WithContractAbi},
     contract::system_api,
     ensure, ApplicationCallResult, CalleeContext, Contract, ExecutionResult, MessageContext,
     OperationContext, OutgoingMessage, SessionCallResult, ViewStateStorage,
@@ -62,6 +62,8 @@ impl Contract for MatchingEngine {
         let mut result = ExecutionResult::default();
         match operation {
             Operation::ExecuteOrder { order } => {
+                let owner = Self::get_owner(&order);
+                Self::check_account_authentication(None, context.authenticated_signer, owner)?;
                 if context.chain_id == system_api::current_application_id().creation.chain_id {
                     self.execute_order_local(order).await?;
                 } else {
@@ -84,6 +86,8 @@ impl Contract for MatchingEngine {
         );
         match message {
             Message::ExecuteOrder { order } => {
+                let owner = Self::get_owner(&order);
+                Self::check_account_authentication(None, context.authenticated_signer, owner)?;
                 self.execute_order_local(order).await?;
             }
         }
@@ -102,6 +106,12 @@ impl Contract for MatchingEngine {
         let mut result = ApplicationCallResult::default();
         match argument {
             ApplicationCall::ExecuteOrder { order } => {
+                let owner = Self::get_owner(&order);
+                Self::check_account_authentication(
+                    context.authenticated_caller_id,
+                    context.authenticated_signer,
+                    owner,
+                )?;
                 if context.chain_id == system_api::current_application_id().creation.chain_id {
                     self.execute_order_local(order).await?;
                 } else {
@@ -126,6 +136,37 @@ impl Contract for MatchingEngine {
 }
 
 impl MatchingEngine {
+    /// Get the owner from the order
+    fn get_owner(order: &Order) -> AccountOwner {
+        match order {
+            Order::Insert {
+                owner,
+                amount: _,
+                nature: _,
+                price: _,
+            } => *owner,
+            Order::Cancel { owner, order_id: _ } => *owner,
+            Order::Modify {
+                owner,
+                order_id: _,
+                cancel_amount: _,
+            } => *owner,
+        }
+    }
+
+    /// authenticate the originator of the message
+    fn check_account_authentication(
+        authenticated_application_id: Option<ApplicationId>,
+        authenticated_signer: Option<Owner>,
+        owner: AccountOwner,
+    ) -> Result<(), MatchingEngineError> {
+        match owner {
+            AccountOwner::User(address) if authenticated_signer == Some(address) => Ok(()),
+            AccountOwner::Application(id) if authenticated_application_id == Some(id) => Ok(()),
+            _ => Err(MatchingEngineError::IncorrectAuthentication),
+        }
+    }
+
     /// The application engine is trading between two tokens. Those tokens are the parameters of the
     /// construction of the exchange and are accessed by index in the system.
     fn fungible_id(token_idx: u32) -> Result<ApplicationId<FungibleTokenAbi>, MatchingEngineError> {
@@ -266,7 +307,6 @@ impl MatchingEngine {
         result.messages.push(OutgoingMessage {
             destination: chain_id.into(),
             authenticated: true,
-            is_skippable: false,
             message,
         });
         Ok(())
@@ -365,7 +405,7 @@ impl MatchingEngine {
         if let Some(key_book) = key_book {
             match key_book.nature {
                 OrderNature::Bid => {
-                    let view = self.bids.load_entry_mut(&key_book.price.revert()).await?;
+                    let view = self.bids.load_entry_mut(&key_book.price.to_bid()).await?;
                     let (cancel_amount, remove_order_id) =
                         Self::modify_order_level(view, order_id, cancel_amount).await?;
                     if remove_order_id {
@@ -380,7 +420,7 @@ impl MatchingEngine {
                     Ok(transfer)
                 }
                 OrderNature::Ask => {
-                    let view = self.asks.load_entry_mut(&key_book.price).await?;
+                    let view = self.asks.load_entry_mut(&key_book.price.to_ask()).await?;
                     let (cancel_count, remove_order_id) =
                         Self::modify_order_level(view, order_id, cancel_amount).await?;
                     if remove_order_id {
@@ -616,7 +656,7 @@ impl MatchingEngine {
                 let mut matching_price_asks = Vec::new();
                 self.asks
                     .for_each_index_while(|price_ask| {
-                        let matches = price_ask <= *price;
+                        let matches = price_ask.to_price() <= *price;
                         if matches {
                             matching_price_asks.push(price_ask);
                         }
@@ -631,7 +671,7 @@ impl MatchingEngine {
                         &mut final_amount,
                         &mut transfers,
                         &nature,
-                        price_ask,
+                        price_ask.to_price(),
                         *price,
                     )
                     .await?;
@@ -643,9 +683,8 @@ impl MatchingEngine {
                         break;
                     }
                 }
-                let price_revert = price.revert();
                 if final_amount != Amount::ZERO {
-                    let view = self.bids.load_entry_mut(&price_revert).await?;
+                    let view = self.bids.load_entry_mut(&price.to_bid()).await?;
                     let order = OrderEntry {
                         amount: final_amount,
                         owner: *owner,
@@ -657,32 +696,30 @@ impl MatchingEngine {
                 }
             }
             OrderNature::Ask => {
-                let price_revert = price.revert();
                 let mut matching_price_bids = Vec::new();
                 self.bids
                     .for_each_index_while(|price_bid| {
-                        let matches = price_bid <= price_revert;
+                        let matches = price_bid.to_price() >= *price;
                         if matches {
-                            let price_bid = price_bid.revert();
                             matching_price_bids.push(price_bid);
                         }
                         Ok(matches)
                     })
                     .await?;
                 for price_bid in matching_price_bids {
-                    let view = self.bids.load_entry_mut(&price_bid.revert()).await?;
+                    let view = self.bids.load_entry_mut(&price_bid).await?;
                     let remove_entry = Self::level_clearing(
                         view,
                         owner,
                         &mut final_amount,
                         &mut transfers,
                         &nature,
-                        price_bid,
+                        price_bid.to_price(),
                         *price,
                     )
                     .await?;
                     if view.queue.count() == 0 {
-                        self.bids.remove_entry(&price_bid.revert())?;
+                        self.bids.remove_entry(&price_bid)?;
                     }
                     self.remove_order_ids(remove_entry).await?;
                     if final_amount == Amount::ZERO {
@@ -690,7 +727,7 @@ impl MatchingEngine {
                     }
                 }
                 if final_amount != Amount::ZERO {
-                    let view = self.asks.load_entry_mut(price).await?;
+                    let view = self.asks.load_entry_mut(&price.to_ask()).await?;
                     let order = OrderEntry {
                         amount: final_amount,
                         owner: *owner,

@@ -4,7 +4,7 @@
 use crate::{
     data_types::{
         Block, BlockExecutionOutcome, ChainAndHeight, ChannelFullName, Event, IncomingMessage,
-        Medium, Origin, OutgoingMessage, Target,
+        Medium, MessageAction, Origin, OutgoingMessage, Target,
     },
     inbox::{InboxError, InboxStateView},
     outbox::OutboxStateView,
@@ -17,6 +17,7 @@ use linera_base::{
     data_types::{Amount, ArithmeticError, BlockHeight, Timestamp},
     ensure,
     identifiers::{ChainId, Destination, MessageId},
+    sync::Lazy,
 };
 use linera_execution::{
     system::{SystemExecutionError, SystemMessage},
@@ -33,7 +34,6 @@ use linera_views::{
     set_view::SetView,
     views::{CryptoHashView, RootView, View, ViewError},
 };
-use once_cell::sync::Lazy;
 use prometheus::{register_histogram_vec, register_int_counter_vec, HistogramVec, IntCounterVec};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -125,6 +125,12 @@ pub struct ChainTipState {
     pub block_hash: Option<CryptoHash>,
     /// Sequence number tracking blocks.
     pub next_block_height: BlockHeight,
+    /// Number of incoming messages.
+    pub num_incoming_messages: u32,
+    /// Number of operations.
+    pub num_operations: u32,
+    /// Number of outgoing messages.
+    pub num_outgoing_messages: u32,
 }
 
 impl ChainTipState {
@@ -160,6 +166,33 @@ impl ChainTipState {
     /// Returns `true` if the next block will be the first, i.e. the chain doesn't have any blocks.
     pub fn is_first_block(&self) -> bool {
         self.next_block_height == BlockHeight::ZERO
+    }
+
+    /// Checks if the measurement counters would be valid.
+    pub fn verify_counters(
+        &self,
+        new_block: &Block,
+        outcome: &BlockExecutionOutcome,
+    ) -> Result<(), ChainError> {
+        let num_incoming_messages = u32::try_from(new_block.incoming_messages.len())
+            .map_err(|_| ArithmeticError::Overflow)?;
+        self.num_incoming_messages
+            .checked_add(num_incoming_messages)
+            .ok_or(ArithmeticError::Overflow)?;
+
+        let num_operations =
+            u32::try_from(new_block.operations.len()).map_err(|_| ArithmeticError::Overflow)?;
+        self.num_operations
+            .checked_add(num_operations)
+            .ok_or(ArithmeticError::Overflow)?;
+
+        let num_outgoing_messages =
+            u32::try_from(outcome.messages.len()).map_err(|_| ArithmeticError::Overflow)?;
+        self.num_outgoing_messages
+            .checked_add(num_outgoing_messages)
+            .ok_or(ArithmeticError::Overflow)?;
+
+        Ok(())
     }
 }
 
@@ -360,7 +393,7 @@ where
             let OutgoingMessage {
                 destination,
                 authenticated_signer,
-                is_skippable,
+                is_protected,
                 message,
             } = outgoing_message;
             // Skip events that do not belong to this origin OR have no effect on this
@@ -399,7 +432,7 @@ where
                 height,
                 index,
                 authenticated_signer,
-                is_skippable,
+                is_protected,
                 timestamp,
                 message,
             });
@@ -556,6 +589,7 @@ where
                             message: Message::System(SystemMessage::OpenChain { .. }),
                             ..
                         },
+                        action: MessageAction::Accept,
                         ..
                     })
                 ),
@@ -563,6 +597,20 @@ where
             );
         }
         for (index, message) in block.incoming_messages.iter().enumerate() {
+            if let MessageAction::Reject = message.action {
+                ensure!(
+                    !message.event.is_protected,
+                    ChainError::CannotRejectMessage {
+                        chain_id,
+                        origin: Box::new(message.origin.clone()),
+                        event: message.event.clone(),
+                    }
+                );
+                // Skip execution of rejected message.
+                message_counts
+                    .push(u32::try_from(messages.len()).map_err(|_| ArithmeticError::Overflow)?);
+                continue;
+            }
             let index = u32::try_from(index).map_err(|_| ArithmeticError::Overflow)?;
             let chain_execution_context = ChainExecutionContext::IncomingMessage(index);
             // Execute the received message.
@@ -675,6 +723,11 @@ where
         WASM_BYTES_WRITTEN_PER_BLOCK
             .with_label_values(&[])
             .observe(tracker.bytes_written as f64);
+
+        assert_eq!(
+            message_counts.len(),
+            block.incoming_messages.len() + block.operations.len()
+        );
         Ok(BlockExecutionOutcome {
             messages,
             message_counts,
@@ -737,7 +790,7 @@ where
         for RawOutgoingMessage {
             destination,
             authenticated,
-            is_skippable,
+            is_protected,
             message,
         } in raw_result.messages
         {
@@ -757,7 +810,7 @@ where
             messages.push(OutgoingMessage {
                 destination,
                 authenticated_signer,
-                is_skippable,
+                is_protected,
                 message: lift(message),
             });
         }

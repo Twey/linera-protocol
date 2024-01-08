@@ -19,7 +19,7 @@ use linera_base::{
 };
 use linera_chain::{
     data_types::{
-        ChannelFullName, Event, ExecutedBlock, HashedValue, IncomingMessage, Origin,
+        ChannelFullName, Event, ExecutedBlock, HashedValue, IncomingMessage, MessageAction, Origin,
         OutgoingMessage,
     },
     test::{make_child_block, make_first_block, BlockTestExt},
@@ -28,9 +28,10 @@ use linera_execution::{
     committee::Epoch,
     policy::ResourceControlPolicy,
     system::{SystemChannel, SystemMessage, SystemOperation},
-    Bytecode, BytecodeLocation, ChainOwnership, ChannelSubscription, ExecutionStateView,
-    GenericApplicationId, Message, Operation, OperationContext, ResourceTracker,
-    SystemExecutionState, UserApplicationDescription, UserApplicationId, WasmContract, WasmRuntime,
+    Bytecode, BytecodeLocation, ChainOwnership, ChannelSubscription, ExecutionRuntimeConfig,
+    ExecutionStateView, GenericApplicationId, Message, Operation, OperationContext,
+    ResourceTracker, SystemExecutionState, UserApplicationDescription, UserApplicationId,
+    WasmContractModule, WasmRuntime,
 };
 use linera_storage::{MemoryStorage, Storage};
 use linera_views::views::{CryptoHashView, ViewError};
@@ -116,7 +117,8 @@ where
         linera_execution::wasm_test::get_example_bytecode_paths("counter")?;
     let contract_bytecode = Bytecode::load_from_file(contract_path).await?;
     let service_bytecode = Bytecode::load_from_file(service_path).await?;
-    let contract = Arc::new(WasmContract::new(contract_bytecode.clone(), wasm_runtime).await?);
+    let contract =
+        Arc::new(WasmContractModule::new(contract_bytecode.clone(), wasm_runtime).await?);
 
     // Publish some bytecode.
     let publish_operation = SystemOperation::PublishBytecode {
@@ -140,7 +142,7 @@ where
         messages: vec![OutgoingMessage {
             destination: Destination::Recipient(publisher_chain.into()),
             authenticated_signer: None,
-            is_skippable: false,
+            is_protected: true,
             message: Message::System(publish_message.clone()),
         }],
         message_counts: vec![1],
@@ -168,10 +170,11 @@ where
             height: publish_block_height,
             index: 0,
             authenticated_signer: None,
-            is_skippable: false,
+            is_protected: true,
             timestamp: Timestamp::from(1),
             message: Message::System(publish_message),
         },
+        action: MessageAction::Accept,
     };
     let broadcast_block = make_child_block(&publish_certificate.value)
         .with_timestamp(1)
@@ -200,7 +203,7 @@ where
         messages: vec![OutgoingMessage {
             destination: broadcast_channel,
             authenticated_signer: None,
-            is_skippable: false,
+            is_protected: false,
             message: Message::System(broadcast_message.clone()),
         }],
         message_counts: vec![1],
@@ -244,13 +247,17 @@ where
         timestamp: Timestamp::from(2),
         ..make_state(Epoch::ZERO, creator_chain, admin_id)
     };
-    let creator_state = ExecutionStateView::from_system_state(creator_system_state.clone()).await;
+    let creator_state = ExecutionStateView::from_system_state(
+        creator_system_state.clone(),
+        ExecutionRuntimeConfig::default(),
+    )
+    .await;
     let subscribe_block_proposal = HashedValue::new_confirmed(ExecutedBlock {
         block: subscribe_block,
         messages: vec![OutgoingMessage {
             destination: Destination::Recipient(publisher_chain.into()),
             authenticated_signer: None,
-            is_skippable: false,
+            is_protected: true,
             message: Message::System(subscribe_message.clone()),
         }],
         message_counts: vec![1],
@@ -278,10 +285,11 @@ where
             height: subscribe_block_height,
             index: 0,
             authenticated_signer: None,
-            is_skippable: false,
+            is_protected: true,
             timestamp: Timestamp::from(2),
             message: subscribe_message.into(),
         },
+        action: MessageAction::Accept,
     };
     let accept_block = make_child_block(&broadcast_certificate.value)
         .with_timestamp(3)
@@ -293,7 +301,7 @@ where
         messages: vec![OutgoingMessage {
             destination: Destination::Recipient(creator_chain.into()),
             authenticated_signer: None,
-            is_skippable: false,
+            is_protected: true,
             message: Message::System(SystemMessage::Notify {
                 id: creator_chain.into(),
             }),
@@ -354,10 +362,11 @@ where
                 height: broadcast_block_height,
                 index: 0,
                 authenticated_signer: None,
-                is_skippable: false,
+                is_protected: false,
                 timestamp: Timestamp::from(1),
                 message: Message::System(broadcast_message),
             },
+            action: MessageAction::Accept,
         });
     creator_system_state
         .registry
@@ -368,7 +377,11 @@ where
         .known_applications
         .insert(application_id, application_description.clone());
     creator_system_state.timestamp = Timestamp::from(4);
-    let mut creator_state = ExecutionStateView::from_system_state(creator_system_state).await;
+    let mut creator_state = ExecutionStateView::from_system_state(
+        creator_system_state,
+        ExecutionRuntimeConfig::default(),
+    )
+    .await;
     creator_state
         .simulate_initialization(
             contract,
@@ -381,7 +394,7 @@ where
         messages: vec![OutgoingMessage {
             destination: Destination::Recipient(creator_chain.into()),
             authenticated_signer: None,
-            is_skippable: false,
+            is_protected: true,
             message: Message::System(SystemMessage::ApplicationCreated),
         }],
         message_counts: vec![0, 1],

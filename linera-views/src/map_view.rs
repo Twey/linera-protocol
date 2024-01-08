@@ -19,9 +19,8 @@
 use crate::{
     batch::Batch,
     common::{
-        get_interval, insert_key_prefix, is_index_absent, Context, CustomSerialize,
-        GreatestLowerBoundIterator, HasherOutput, KeyIterable, KeyValueIterable, Update,
-        MIN_VIEW_TAG,
+        contains_key, get_interval, insert_key_prefix, Context, CustomSerialize, HasherOutput,
+        KeyIterable, KeyValueIterable, SuffixClosedSetIterator, Update, MIN_VIEW_TAG,
     },
     views::{HashableView, Hasher, View, ViewError},
 };
@@ -49,7 +48,7 @@ enum KeyTag {
 #[derive(Debug)]
 pub struct ByteMapView<C, V> {
     context: C,
-    was_cleared: bool,
+    delete_storage_first: bool,
     updates: BTreeMap<Vec<u8>, Update<V>>,
     deleted_prefixes: BTreeSet<Vec<u8>>,
     stored_hash: Option<HasherOutput>,
@@ -72,7 +71,7 @@ where
         let hash = context.read_value(&key).await?;
         Ok(Self {
             context,
-            was_cleared: false,
+            delete_storage_first: false,
             updates: BTreeMap::new(),
             deleted_prefixes: BTreeSet::new(),
             stored_hash: hash,
@@ -81,14 +80,14 @@ where
     }
 
     fn rollback(&mut self) {
-        self.was_cleared = false;
+        self.delete_storage_first = false;
         self.updates.clear();
         self.deleted_prefixes.clear();
         *self.hash.get_mut() = self.stored_hash;
     }
 
     fn flush(&mut self, batch: &mut Batch) -> Result<(), ViewError> {
-        if self.was_cleared {
+        if self.delete_storage_first {
             batch.delete_key_prefix(self.context.base_key());
             for (index, update) in mem::take(&mut self.updates) {
                 if let Update::Set(value) = update {
@@ -96,6 +95,7 @@ where
                     batch.put_key_value(key, &value)?;
                 }
             }
+            self.stored_hash = None;
         } else {
             for index in mem::take(&mut self.deleted_prefixes) {
                 let key = self.context.base_tag_index(KeyTag::Index as u8, &index);
@@ -110,11 +110,7 @@ where
             }
         }
         let hash = *self.hash.get_mut();
-        // In the scenario where we do a clear
-        // and stored_hash = hash, we need to update the
-        // hash, otherwise, we will recompute it while this
-        // can be avoided.
-        if self.stored_hash != hash || self.was_cleared {
+        if self.stored_hash != hash {
             let key = self.context.base_tag(KeyTag::Hash as u8);
             match hash {
                 None => batch.delete_key(key),
@@ -122,12 +118,12 @@ where
             }
             self.stored_hash = hash;
         }
-        self.was_cleared = false;
+        self.delete_storage_first = false;
         Ok(())
     }
 
     fn clear(&mut self) {
-        self.was_cleared = true;
+        self.delete_storage_first = true;
         self.updates.clear();
         self.deleted_prefixes.clear();
         *self.hash.get_mut() = None;
@@ -170,7 +166,8 @@ where
     /// ```
     pub fn remove(&mut self, short_key: Vec<u8>) {
         *self.hash.get_mut() = None;
-        if self.was_cleared {
+        if self.delete_storage_first {
+            // Optimization: No need to mark `short_key` for deletion as we are going to remove all the keys at once.
             self.updates.remove(&short_key);
         } else {
             self.updates.insert(short_key, Update::Removed);
@@ -201,7 +198,7 @@ where
         for key in key_list {
             self.updates.remove(&key);
         }
-        if !self.was_cleared {
+        if !self.delete_storage_first {
             insert_key_prefix(&mut self.deleted_prefixes, key_prefix);
         }
     }
@@ -238,10 +235,10 @@ where
             };
             return Ok(value);
         }
-        if self.was_cleared {
+        if self.delete_storage_first {
             return Ok(None);
         }
-        if !is_index_absent(&self.deleted_prefixes, short_key) {
+        if contains_key(&self.deleted_prefixes, short_key) {
             return Ok(None);
         }
         let key = self.context.base_tag_index(KeyTag::Index as u8, short_key);
@@ -250,7 +247,7 @@ where
 
     /// Loads the value in updates if that is at all possible.
     async fn load_value(&mut self, short_key: &[u8]) -> Result<(), ViewError> {
-        if !self.was_cleared && !self.updates.contains_key(short_key) {
+        if !self.delete_storage_first && !self.updates.contains_key(short_key) {
             let key = self.context.base_tag_index(KeyTag::Index as u8, short_key);
             let value = self.context.read_value(&key).await?;
             if let Some(value) = value {
@@ -322,10 +319,10 @@ where
     {
         let prefix_len = prefix.len();
         let iter = self.deleted_prefixes.range(get_interval(prefix.clone()));
-        let mut lower_bound = GreatestLowerBoundIterator::new(prefix_len, iter);
+        let mut suffix_closed_set = SuffixClosedSetIterator::new(prefix_len, iter);
         let mut updates = self.updates.range(get_interval(prefix.clone()));
         let mut update = updates.next();
-        if !self.was_cleared && is_index_absent(&self.deleted_prefixes, &prefix) {
+        if !self.delete_storage_first && !contains_key(&self.deleted_prefixes, &prefix) {
             let base = self.context.base_tag_index(KeyTag::Index as u8, &prefix);
             for index in self.context.find_keys_by_prefix(&base).await?.iterator() {
                 let index = index?;
@@ -343,7 +340,7 @@ where
                             }
                         }
                         _ => {
-                            if lower_bound.is_index_absent(index) && !f(index)? {
+                            if !suffix_closed_set.find_key(index) && !f(index)? {
                                 return Ok(());
                             }
                             break;
@@ -517,10 +514,10 @@ where
     {
         let prefix_len = prefix.len();
         let iter = self.deleted_prefixes.range(get_interval(prefix.clone()));
-        let mut lower_bound = GreatestLowerBoundIterator::new(prefix_len, iter);
+        let mut suffix_closed_set = SuffixClosedSetIterator::new(prefix_len, iter);
         let mut updates = self.updates.range(get_interval(prefix.clone()));
         let mut update = updates.next();
-        if !self.was_cleared && is_index_absent(&self.deleted_prefixes, &prefix) {
+        if !self.delete_storage_first && !contains_key(&self.deleted_prefixes, &prefix) {
             let base = self.context.base_tag_index(KeyTag::Index as u8, &prefix);
             for entry in self
                 .context
@@ -544,7 +541,7 @@ where
                             }
                         }
                         _ => {
-                            if lower_bound.is_index_absent(index) && !f(index, bytes)? {
+                            if !suffix_closed_set.find_key(index) && !f(index, bytes)? {
                                 return Ok(());
                             }
                             break;
@@ -702,7 +699,7 @@ where
         use std::collections::btree_map::Entry;
 
         let update = match self.updates.entry(short_key.clone()) {
-            Entry::Vacant(e) if self.was_cleared => e.insert(Update::Set(V::default())),
+            Entry::Vacant(e) if self.delete_storage_first => e.insert(Update::Set(V::default())),
             Entry::Vacant(e) => {
                 let key = self.context.base_tag_index(KeyTag::Index as u8, &short_key);
                 let value = self.context.read_value(&key).await?.unwrap_or_default();

@@ -7,23 +7,28 @@ use super::{
 };
 use crate::{
     cli_wrappers::{ClientWrapper, LineraNet, LineraNetConfig, Network},
-    util::{self, current_binary_parent, CommandExt},
+    util::{self, CommandExt},
 };
 use anyhow::{anyhow, bail, ensure, Result};
 use async_trait::async_trait;
-use futures::{
-    future::{self, join_all},
-    lock::Mutex,
-    FutureExt,
-};
+use futures::{future, lock::Mutex};
 use k8s_openapi::api::core::v1::Pod;
 use kube::{
     api::{Api, ListParams},
     Client,
 };
+use linera_base::data_types::Amount;
 use std::{fs, path::PathBuf, sync::Arc};
 use tempfile::{tempdir, TempDir};
 use tokio::process::Command;
+#[cfg(any(test, feature = "test"))]
+use tokio::sync::OnceCell;
+
+#[cfg(any(test, feature = "test"))]
+static SHARED_LOCAL_KUBERNETES_TESTING_NET: OnceCell<(
+    Arc<Mutex<LocalKubernetesNet>>,
+    ClientWrapper,
+)> = OnceCell::const_new();
 
 /// The information needed to start a [`LocalKubernetesNet`].
 pub struct LocalKubernetesNetConfig {
@@ -31,23 +36,24 @@ pub struct LocalKubernetesNetConfig {
     pub testing_prng_seed: Option<u64>,
     pub num_initial_validators: usize,
     pub num_shards: usize,
-    pub binaries_dir: Option<PathBuf>,
+    pub binaries: Option<Option<PathBuf>>,
 }
 
 /// A simplified version of [`LocalKubernetesNetConfig`]
 #[cfg(any(test, feature = "test"))]
-pub struct LocalKubernetesNetTestingConfig {
+pub struct SharedLocalKubernetesNetTestingConfig {
     pub network: Network,
-    pub binaries_dir: Option<PathBuf>,
+    pub binaries: Option<Option<PathBuf>>,
 }
 
 /// A set of Linera validators running locally as native processes.
+#[derive(Clone)]
 pub struct LocalKubernetesNet {
     network: Network,
     testing_prng_seed: Option<u64>,
     next_client_id: usize,
     tmp_dir: Arc<TempDir>,
-    binaries_dir: Option<PathBuf>,
+    binaries: Option<Option<PathBuf>>,
     kubectl_instance: Arc<Mutex<KubectlInstance>>,
     kind_clusters: Vec<KindCluster>,
     num_initial_validators: usize,
@@ -55,12 +61,9 @@ pub struct LocalKubernetesNet {
 }
 
 #[cfg(any(test, feature = "test"))]
-impl LocalKubernetesNetTestingConfig {
-    pub fn new(network: Network, binaries_dir: Option<PathBuf>) -> Self {
-        Self {
-            network,
-            binaries_dir,
-        }
+impl SharedLocalKubernetesNetTestingConfig {
+    pub fn new(network: Network, binaries: Option<Option<PathBuf>>) -> Self {
+        Self { network, binaries }
     }
 }
 
@@ -69,77 +72,118 @@ impl LineraNetConfig for LocalKubernetesNetConfig {
     type Net = LocalKubernetesNet;
 
     async fn instantiate(self) -> Result<(Self::Net, ClientWrapper)> {
-        let mut net = LocalKubernetesNet::new(
-            self.network,
-            self.testing_prng_seed,
-            self.binaries_dir,
-            KubectlInstance::new(Vec::new()),
-            future::ready(
-                (0..self.num_initial_validators)
-                    .map(|_| async {
-                        KindCluster::create()
-                            .await
-                            .expect("Creating kind cluster should not fail")
-                    })
-                    .collect::<Vec<_>>(),
-            )
-            .then(join_all)
-            .await
-            .into_iter()
-            .collect::<Vec<_>>(),
-            self.num_initial_validators,
-            self.num_shards,
-        )?;
-        let client = net.make_client();
         ensure!(
             self.num_initial_validators > 0,
             "There should be at least one initial validator"
         );
+
+        let clusters = future::join_all((0..self.num_initial_validators).map(|_| async {
+            KindCluster::create()
+                .await
+                .expect("Creating kind cluster should not fail")
+        }))
+        .await;
+
+        let mut net = LocalKubernetesNet::new(
+            self.network,
+            self.testing_prng_seed,
+            self.binaries,
+            KubectlInstance::new(Vec::new()),
+            clusters,
+            self.num_initial_validators,
+            self.num_shards,
+        )?;
+
+        let client = net.make_client().await;
         net.generate_initial_validator_config().await.unwrap();
-        client.create_genesis_config().await.unwrap();
+        client
+            .create_genesis_config(Amount::from_tokens(10))
+            .await
+            .unwrap();
         net.run().await.unwrap();
+
         Ok((net, client))
     }
 }
 
 #[cfg(any(test, feature = "test"))]
 #[async_trait]
-impl LineraNetConfig for LocalKubernetesNetTestingConfig {
-    type Net = LocalKubernetesNet;
+impl LineraNetConfig for SharedLocalKubernetesNetTestingConfig {
+    type Net = Arc<Mutex<LocalKubernetesNet>>;
 
     async fn instantiate(self) -> Result<(Self::Net, ClientWrapper)> {
         let seed = 37;
-        let num_validators = 4;
-        let num_shards = 4;
+        let (ref net_arc, initial_client) = SHARED_LOCAL_KUBERNETES_TESTING_NET
+            .get_or_init(|| async {
+                let num_validators = 4;
+                let num_shards = 4;
 
-        let mut net = LocalKubernetesNet::new(
-            self.network,
-            Some(seed),
-            self.binaries_dir,
-            KubectlInstance::new(Vec::new()),
-            future::ready(
-                (0..num_validators)
-                    .map(|_| async {
-                        KindCluster::create()
-                            .await
-                            .expect("Creating kind cluster should not fail")
-                    })
-                    .collect::<Vec<_>>(),
-            )
-            .then(join_all)
-            .await
-            .into_iter()
-            .collect::<Vec<_>>(),
-            num_validators,
-            num_shards,
-        )?;
-        let client = net.make_client();
-        if num_validators > 0 {
-            net.generate_initial_validator_config().await.unwrap();
-            client.create_genesis_config().await.unwrap();
-            net.run().await.unwrap();
+                let clusters = future::join_all((0..num_validators).map(|_| async {
+                    KindCluster::create()
+                        .await
+                        .expect("Creating kind cluster should not fail")
+                }))
+                .await;
+
+                let mut net = LocalKubernetesNet::new(
+                    self.network,
+                    Some(seed),
+                    self.binaries,
+                    KubectlInstance::new(Vec::new()),
+                    clusters,
+                    num_validators,
+                    num_shards,
+                )
+                .expect("Creating LocalKubernetesNet should not fail");
+
+                let initial_client = net.make_client().await;
+                if num_validators > 0 {
+                    net.generate_initial_validator_config().await.unwrap();
+                    initial_client
+                        .create_genesis_config(Amount::from_tokens(1000))
+                        .await
+                        .unwrap();
+                    net.run().await.unwrap();
+                }
+
+                (Arc::new(Mutex::new(net)), initial_client)
+            })
+            .await;
+
+        let mut net_arc_clone = net_arc.clone();
+        let client = net_arc_clone.make_client().await;
+        client.wallet_init(&[], None).await.unwrap();
+
+        for _ in 0..2 {
+            initial_client
+                .open_and_assign(&client, Amount::from_tokens(10))
+                .await
+                .unwrap();
         }
-        Ok((net, client))
+
+        Ok((net_arc_clone, client))
+    }
+}
+
+#[async_trait]
+impl LineraNet for Arc<Mutex<LocalKubernetesNet>> {
+    async fn ensure_is_running(&mut self) -> Result<()> {
+        let self_clone = self.clone();
+        let mut self_lock = self_clone.lock().await;
+
+        self_lock.ensure_is_running().await
+    }
+
+    async fn make_client(&mut self) -> ClientWrapper {
+        let self_clone = self.clone();
+        let mut self_lock = self_clone.lock().await;
+
+        self_lock.make_client().await
+    }
+
+    async fn terminate(&mut self) -> Result<()> {
+        // Users are responsible for killing the clusters if they want to
+        Ok(())
     }
 }
 
@@ -184,7 +228,7 @@ impl LineraNet for LocalKubernetesNet {
         Ok(())
     }
 
-    fn make_client(&mut self) -> ClientWrapper {
+    async fn make_client(&mut self) -> ClientWrapper {
         let client = ClientWrapper::new(
             self.tmp_dir.clone(),
             self.network,
@@ -235,7 +279,7 @@ impl LocalKubernetesNet {
     fn new(
         network: Network,
         testing_prng_seed: Option<u64>,
-        binaries_dir: Option<PathBuf>,
+        binaries: Option<Option<PathBuf>>,
         kubectl_instance: KubectlInstance,
         kind_clusters: Vec<KindCluster>,
         num_initial_validators: usize,
@@ -246,7 +290,7 @@ impl LocalKubernetesNet {
             testing_prng_seed,
             next_client_id: 0,
             tmp_dir: Arc::new(tempdir()?),
-            binaries_dir,
+            binaries,
             kubectl_instance: Arc::new(Mutex::new(kubectl_instance)),
             kind_clusters,
             num_initial_validators,
@@ -324,19 +368,11 @@ impl LocalKubernetesNet {
     }
 
     async fn run(&mut self) -> Result<()> {
-        let binary_parent =
-            current_binary_parent().expect("Fetching current binaries path should not fail");
-        let binaries_path = if let Some(binaries_dir) = &self.binaries_dir {
-            binaries_dir
-        } else {
-            &binary_parent
-        };
-
         let github_root = get_github_root().await?;
         // Build Docker image
         let docker_image = DockerImage::build(
             String::from("linera-test:latest"),
-            binaries_path,
+            &self.binaries,
             &github_root,
         )
         .await?;
@@ -403,7 +439,9 @@ impl LocalKubernetesNet {
             validators_initialization_futures.push(future);
         }
 
-        join_all(validators_initialization_futures).await;
-        Ok(())
+        future::join_all(validators_initialization_futures)
+            .await
+            .into_iter()
+            .collect()
     }
 }

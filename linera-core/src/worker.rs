@@ -10,11 +10,12 @@ use linera_base::{
     data_types::{ArithmeticError, BlockHeight, Round},
     doc_scalar, ensure,
     identifiers::{ChainId, Owner},
+    sync::Lazy,
 };
 use linera_chain::{
     data_types::{
         Block, BlockAndRound, BlockProposal, Certificate, CertificateValue, ExecutedBlock,
-        HashedValue, IncomingMessage, LiteCertificate, Medium, Origin, Target,
+        HashedValue, IncomingMessage, LiteCertificate, Medium, MessageAction, Origin, Target,
     },
     ChainManagerOutcome, ChainStateView,
 };
@@ -28,7 +29,6 @@ use linera_views::{
     views::{RootView, View, ViewError},
 };
 use lru::LruCache;
-use once_cell::sync::Lazy;
 use prometheus::{register_histogram_vec, register_int_counter_vec, HistogramVec, IntCounterVec};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -457,7 +457,7 @@ where
 
     async fn create_cross_chain_request(
         &self,
-        confirmed_log: &mut LogView<StorageClient::Context, CryptoHash>,
+        confirmed_log: &LogView<StorageClient::Context, CryptoHash>,
         height_map: Vec<(Medium, Vec<BlockHeight>)>,
         sender: ChainId,
         recipient: ChainId,
@@ -482,7 +482,7 @@ where
     /// Loads pending cross-chain requests.
     async fn create_network_actions(
         &self,
-        chain: &mut ChainStateView<StorageClient::Context>,
+        chain: &ChainStateView<StorageClient::Context>,
     ) -> Result<NetworkActions, WorkerError> {
         let mut heights_by_recipient: BTreeMap<_, BTreeMap<_, _>> = Default::default();
         let targets = chain.outboxes.indices().await?;
@@ -499,7 +499,7 @@ where
         for (recipient, height_map) in heights_by_recipient {
             let request = self
                 .create_cross_chain_request(
-                    &mut chain.confirmed_log,
+                    &chain.confirmed_log,
                     height_map.into_iter().collect(),
                     chain_id,
                     recipient,
@@ -537,7 +537,7 @@ where
         if tip.next_block_height > block.height {
             // Block was already confirmed.
             let info = ChainInfoResponse::new(&chain, self.key_pair());
-            let actions = self.create_network_actions(&mut chain).await?;
+            let actions = self.create_network_actions(&chain).await?;
             self.register_delivery_notifier(
                 block.chain_id,
                 block.height,
@@ -594,9 +594,9 @@ where
         result_certificate?;
         // Execute the block and update inboxes.
         chain.remove_events_from_inboxes(block).await?;
-        // We should always agree on the messages and state hash.
         let local_time = self.storage.current_time();
         let verified_outcome = chain.execute_block(block, local_time).await?;
+        // We should always agree on the messages and state hash.
         ensure!(
             *messages == verified_outcome.messages,
             WorkerError::IncorrectMessages
@@ -613,9 +613,12 @@ where
         let tip = chain.tip_state.get_mut();
         tip.block_hash = Some(certificate.hash());
         tip.next_block_height.try_add_assign_one()?;
+        tip.num_incoming_messages += block.incoming_messages.len() as u32;
+        tip.num_operations += block.operations.len() as u32;
+        tip.num_outgoing_messages += messages.len() as u32;
         chain.confirmed_log.push(certificate.hash());
         let info = ChainInfoResponse::new(&chain, self.key_pair());
-        let mut actions = self.create_network_actions(&mut chain).await?;
+        let mut actions = self.create_network_actions(&chain).await?;
         actions.notifications.push(Notification {
             chain_id: block.chain_id,
             reason: Reason::NewBlock {
@@ -978,7 +981,11 @@ where
 
         assert_eq!(event.message, outgoing_message.message);
 
-        Ok(Some(IncomingMessage { origin, event }))
+        Ok(Some(IncomingMessage {
+            origin,
+            event,
+            action: MessageAction::Accept,
+        }))
     }
 }
 
@@ -1059,6 +1066,8 @@ where
         }
         let local_time = self.storage.current_time();
         let outcome = chain.execute_block(block, local_time).await?;
+        // Check if the counters of tip_state would be valid.
+        chain.tip_state.get().verify_counters(block, &outcome)?;
         // Verify that the resulting chain would have no unconfirmed incoming messages.
         chain.validate_incoming_messages().await?;
         // Reset all the staged changes as we were only validating things.
@@ -1074,7 +1083,7 @@ where
         let info = ChainInfoResponse::new(&chain, self.key_pair());
         chain.save().await?;
         // Trigger any outgoing cross-chain messages that haven't been confirmed yet.
-        let actions = self.create_network_actions(&mut chain).await?;
+        let actions = self.create_network_actions(&chain).await?;
         NUM_ROUNDS_IN_BLOCK_PROPOSAL
             .with_label_values(&[round.type_name()])
             .observe(round.number() as f64);
@@ -1201,6 +1210,7 @@ where
                     messages.push(IncomingMessage {
                         origin: origin.clone(),
                         event: event.clone(),
+                        action: MessageAction::Accept,
                     });
                 }
             }
@@ -1233,7 +1243,7 @@ where
         let response = ChainInfoResponse::new(info, self.key_pair());
         trace!("{} --> {:?}", self.nickname, response);
         // Trigger any outgoing cross-chain messages that haven't been confirmed yet.
-        let actions = self.create_network_actions(&mut chain).await?;
+        let actions = self.create_network_actions(&chain).await?;
         Ok((response, actions))
     }
 

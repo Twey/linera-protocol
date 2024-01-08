@@ -2,10 +2,10 @@
 // Copyright (c) Zefchain Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::node::NodeError;
+use crate::{client::ChainClientError, node::NodeError};
 use linera_base::{
     crypto::{BcsSignable, CryptoHash, KeyPair, Signature},
-    data_types::{Amount, BlockHeight, Timestamp},
+    data_types::{Amount, BlockHeight, Round, Timestamp},
     identifiers::{ChainDescription, ChainId},
 };
 use linera_chain::{
@@ -164,7 +164,7 @@ pub struct ChainInfo {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(any(test, feature = "test"), derive(Eq, PartialEq))]
 pub struct ChainInfoResponse {
-    pub info: ChainInfo,
+    pub info: Box<ChainInfo>,
     pub signature: Option<Signature>,
 }
 
@@ -243,15 +243,15 @@ where
 
 impl ChainInfoResponse {
     pub fn new(info: impl Into<ChainInfo>, key_pair: Option<&KeyPair>) -> Self {
-        let info = info.into();
-        let signature = key_pair.map(|kp| Signature::new(&info, kp));
+        let info = Box::new(info.into());
+        let signature = key_pair.map(|kp| Signature::new(&*info, kp));
         Self { info, signature }
     }
 
     #[allow(clippy::result_large_err)]
     pub fn check(&self, name: ValidatorName) -> Result<(), NodeError> {
         match self.signature {
-            Some(sig) => Ok(sig.check(&self.info, name.0)?),
+            Some(sig) => Ok(sig.check(&*self.info, name.0)?),
             None => Err(NodeError::InvalidChainInfoResponse),
         }
     }
@@ -264,3 +264,58 @@ impl ChainInfoResponse {
 }
 
 impl BcsSignable for ChainInfo {}
+
+/// The outcome of trying to commit a list of operations to the chain.
+#[derive(Debug)]
+pub enum ClientOutcome<T> {
+    /// The operations were committed successfully.
+    Committed(T),
+    /// We are not the round leader and cannot do anything. Try again at the specified time or
+    /// or whenever the round or block height changes.
+    WaitForTimeout(RoundTimeout),
+}
+
+#[derive(Debug)]
+pub struct RoundTimeout {
+    pub timestamp: Timestamp,
+    pub current_round: Round,
+    pub next_block_height: BlockHeight,
+}
+
+impl<T> ClientOutcome<T> {
+    #[cfg(any(test, feature = "test"))]
+    pub fn unwrap(self) -> T {
+        match self {
+            ClientOutcome::Committed(t) => t,
+            ClientOutcome::WaitForTimeout(_) => panic!(),
+        }
+    }
+
+    pub fn expect(self, msg: &'static str) -> T {
+        match self {
+            ClientOutcome::Committed(t) => t,
+            ClientOutcome::WaitForTimeout(_) => panic!("{}", msg),
+        }
+    }
+
+    pub fn map<F, S>(self, f: F) -> ClientOutcome<S>
+    where
+        F: FnOnce(T) -> S,
+    {
+        match self {
+            ClientOutcome::Committed(t) => ClientOutcome::Committed(f(t)),
+            ClientOutcome::WaitForTimeout(timeout) => ClientOutcome::WaitForTimeout(timeout),
+        }
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub fn try_map<F, S>(self, f: F) -> Result<ClientOutcome<S>, ChainClientError>
+    where
+        F: FnOnce(T) -> Result<S, ChainClientError>,
+    {
+        match self {
+            ClientOutcome::Committed(t) => Ok(ClientOutcome::Committed(f(t)?)),
+            ClientOutcome::WaitForTimeout(timeout) => Ok(ClientOutcome::WaitForTimeout(timeout)),
+        }
+    }
+}

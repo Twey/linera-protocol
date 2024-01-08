@@ -6,15 +6,17 @@
 mod applications;
 pub mod committee;
 mod execution;
+mod execution_state_actor;
 mod graphql;
 mod ownership;
 pub mod policy;
 mod resources;
 mod runtime;
-pub mod runtime_actor;
 pub mod system;
+mod util;
 mod wasm;
 
+pub use crate::runtime::{ContractSyncRuntime, ServiceSyncRuntime};
 pub use applications::{
     ApplicationRegistryView, BytecodeLocation, GenericApplicationId, UserApplicationDescription,
     UserApplicationId,
@@ -32,7 +34,7 @@ pub use system::{
 ))]
 pub use wasm::test as wasm_test;
 #[cfg(any(feature = "wasmer", feature = "wasmtime"))]
-pub use wasm::{WasmContract, WasmExecutionError, WasmService};
+pub use wasm::{WasmContractModule, WasmExecutionError, WasmServiceModule};
 #[cfg(any(test, feature = "test"))]
 pub use {applications::ApplicationRegistry, system::SystemExecutionState};
 
@@ -50,21 +52,37 @@ use linera_base::{
     identifiers::{BytecodeId, ChainId, ChannelName, Destination, MessageId, Owner, SessionId},
 };
 use linera_views::{batch::Batch, views::ViewError};
-use runtime_actor::{ContractRuntimeSender, ServiceRuntimeSender};
 use serde::{Deserialize, Serialize};
-use std::{io, path::Path, str::FromStr, sync::Arc};
+use std::{fmt, io, path::Path, str::FromStr, sync::Arc};
 use thiserror::Error;
 
-/// An implementation of [`UserContract`]
-pub type UserContractCode = Arc<dyn UserContract + Send + Sync + 'static>;
+/// An implementation of [`UserContractModule`]
+pub type UserContractCode = Arc<dyn UserContractModule + Send + Sync + 'static>;
 
-/// An implementation of [`UserService`].
-pub type UserServiceCode = Arc<dyn UserService + Send + Sync + 'static>;
+/// An implementation of [`UserServiceModule`].
+pub type UserServiceCode = Arc<dyn UserServiceModule + Send + Sync + 'static>;
 
+/// A factory trait to obtain a [`UserContract`] from a [`UserContractModule`]
+pub trait UserContractModule {
+    fn instantiate(
+        &self,
+        runtime: ContractSyncRuntime,
+    ) -> Result<Box<dyn UserContract + Send + Sync + 'static>, ExecutionError>;
+}
+
+/// A factory trait to obtain a [`UserService`] from a [`UserServiceModule`]
+pub trait UserServiceModule {
+    fn instantiate(
+        &self,
+        runtime: ServiceSyncRuntime,
+    ) -> Result<Box<dyn UserService + Send + Sync + 'static>, ExecutionError>;
+}
+
+/// A type for errors happening during execution.
 #[derive(Error, Debug)]
 pub enum ExecutionError {
     #[error(transparent)]
-    ViewError(ViewError),
+    ViewError(#[from] ViewError),
     #[error(transparent)]
     ArithmeticError(#[from] ArithmeticError),
     #[error(transparent)]
@@ -78,50 +96,64 @@ pub enum ExecutionError {
     JoinError(#[from] tokio::task::JoinError),
     #[error("Host future was polled after it had finished")]
     PolledTwice,
+    #[error("The given promise is invalid or was polled once already")]
+    InvalidPromise,
     #[error("Attempt to use a system API to write to read-only storage")]
     WriteAttemptToReadOnlyStorage,
 
-    #[error("A session is still opened at the end of a transaction")]
-    SessionWasNotClosed,
     #[error("Invalid operation for this application")]
     InvalidOperation,
     #[error("Invalid message for this application")]
     InvalidMessage,
     #[error("Invalid query for this application")]
     InvalidQuery,
-    #[error("Can't call another application during a query")]
-    CallApplicationFromQuery,
-    #[error("Queries can't change application state")]
-    LockStateFromQuery,
-    #[error("Session does not exist or was already closed")]
-    InvalidSession,
-    #[error("Attempted to call or forward an active session")]
-    SessionIsInUse,
-    #[error("Session is not accessible by this owner")]
-    InvalidSessionOwner,
-    #[error("Attempted to call an application while the state is locked")]
-    ApplicationIsInUse,
-    #[error("Attempted to get an entry that is not locked")]
-    ApplicationStateNotLocked,
+
+    #[error("Session {0} does not exist or was already closed")]
+    InvalidSession(SessionId),
+    #[error("Attempted to call or forward an active session {0}")]
+    SessionIsInUse(SessionId),
+    #[error("Attempted to save a session {0} but it is not locked")]
+    SessionStateNotLocked(SessionId),
+    #[error("Session {session_id} is owned by {owned_by} but was accessed by {accessed_by}")]
+    InvalidSessionOwner {
+        session_id: Box<SessionId>,
+        accessed_by: Box<UserApplicationId>,
+        owned_by: Box<UserApplicationId>,
+    },
+    #[error("Session {0} is still opened at the end of a transaction")]
+    SessionWasNotClosed(SessionId),
+
+    #[error("Attempted to call application {0} while the state is locked")]
+    ApplicationIsInUse(UserApplicationId),
+    #[error("Attempted to read the state of application {0} but it is not locked")]
+    ApplicationStateNotLocked(UserApplicationId),
+    #[error("Failed to load bytecode from storage {0:?}")]
+    ApplicationBytecodeNotFound(Box<UserApplicationDescription>),
+
     #[error("Pricing error: {0}")]
     PricingError(#[from] PricingError),
-    #[error("Excessive readings from storage")]
+    #[error("Excessive number of read queries from storage")]
+    ExcessiveNumReads,
+    #[error("Excessive number of bytes read from storage")]
     ExcessiveRead,
-    #[error("Excessive writings to storage")]
+    #[error("Excessive number of bytes written to storage")]
     ExcessiveWrite,
     #[error("Runtime failed to respond to application")]
     MissingRuntimeResponse,
     #[error("Bytecode ID {0:?} is invalid")]
     InvalidBytecodeId(BytecodeId),
-    #[error("Failed to load bytecode from storage {0:?}")]
-    ApplicationBytecodeNotFound(Box<UserApplicationDescription>),
 }
 
-impl From<ViewError> for ExecutionError {
-    fn from(error: ViewError) -> Self {
-        match error {
-            ViewError::TryLockError(_) => ExecutionError::ApplicationIsInUse,
-            error => ExecutionError::ViewError(error),
+impl ExecutionError {
+    fn invalid_session_owner(
+        session_id: SessionId,
+        accessed_by: UserApplicationId,
+        owned_by: UserApplicationId,
+    ) -> Self {
+        Self::InvalidSessionOwner {
+            session_id: Box::new(session_id),
+            accessed_by: Box::new(accessed_by),
+            owned_by: Box::new(owned_by),
         }
     }
 }
@@ -130,25 +162,22 @@ impl From<ViewError> for ExecutionError {
 pub trait UserContract {
     /// Initializes the application state on the chain that owns the application.
     fn initialize(
-        &self,
+        &mut self,
         context: OperationContext,
-        runtime_sender: ContractRuntimeSender,
         argument: Vec<u8>,
     ) -> Result<RawExecutionResult<Vec<u8>>, ExecutionError>;
 
     /// Applies an operation from the current block.
     fn execute_operation(
-        &self,
+        &mut self,
         context: OperationContext,
-        runtime_sender: ContractRuntimeSender,
         operation: Vec<u8>,
     ) -> Result<RawExecutionResult<Vec<u8>>, ExecutionError>;
 
     /// Applies a message originating from a cross-chain message.
     fn execute_message(
-        &self,
+        &mut self,
         context: MessageContext,
-        runtime_sender: ContractRuntimeSender,
         message: Vec<u8>,
     ) -> Result<RawExecutionResult<Vec<u8>>, ExecutionError>;
 
@@ -157,18 +186,16 @@ pub trait UserContract {
     /// When an application is executing an operation or a message it may call other applications,
     /// which can in turn call other applications.
     fn handle_application_call(
-        &self,
+        &mut self,
         context: CalleeContext,
-        runtime_sender: ContractRuntimeSender,
         argument: Vec<u8>,
         forwarded_sessions: Vec<SessionId>,
     ) -> Result<ApplicationCallResult, ExecutionError>;
 
     /// Executes a call from another application into a session created by this application.
     fn handle_session_call(
-        &self,
+        &mut self,
         context: CalleeContext,
-        runtime_sender: ContractRuntimeSender,
         session_state: Vec<u8>,
         argument: Vec<u8>,
         forwarded_sessions: Vec<SessionId>,
@@ -179,9 +206,8 @@ pub trait UserContract {
 pub trait UserService {
     /// Executes unmetered read-only queries on the state of this application.
     fn handle_query(
-        &self,
+        &mut self,
         context: QueryContext,
-        runtime_sender: ServiceRuntimeSender,
         argument: Vec<u8>,
     ) -> Result<Vec<u8>, ExecutionError>;
 }
@@ -206,11 +232,20 @@ pub struct SessionCallResult {
     pub close_session: bool,
 }
 
+/// System runtime implementation in use.
+#[derive(Default, Clone, Copy)]
+pub enum ExecutionRuntimeConfig {
+    #[default]
+    Synchronous,
+}
+
 /// Requirements for the `extra` field in our state views (and notably the
 /// [`ExecutionStateView`]).
 #[async_trait]
 pub trait ExecutionRuntimeContext {
     fn chain_id(&self) -> ChainId;
+
+    fn execution_runtime_config(&self) -> ExecutionRuntimeConfig;
 
     fn user_contracts(&self) -> &Arc<DashMap<UserApplicationId, UserContractCode>>;
 
@@ -273,13 +308,15 @@ pub struct QueryContext {
     pub chain_id: ChainId,
 }
 
-pub trait BaseRuntime: Send + Sync {
-    type Read;
-    type Lock;
-    type Unlock;
-    type ReadValueBytes;
-    type FindKeysByPrefix;
-    type FindKeyValuesByPrefix;
+pub trait BaseRuntime {
+    type Read: fmt::Debug + Send;
+    type Lock: fmt::Debug + Send;
+    type Unlock: fmt::Debug + Send;
+    type ContainsKey: fmt::Debug + Send;
+    type ReadMultiValuesBytes: fmt::Debug + Send;
+    type ReadValueBytes: fmt::Debug + Send;
+    type FindKeysByPrefix: fmt::Debug + Send;
+    type FindKeyValuesByPrefix: fmt::Debug + Send;
 
     /// The current chain id.
     fn chain_id(&mut self) -> Result<ChainId, ExecutionError>;
@@ -331,11 +368,51 @@ pub trait BaseRuntime: Send + Sync {
         self.unlock_wait(&promise)
     }
 
+    /// Tests whether a key exists in the key-value store
+    #[cfg(feature = "test")]
+    fn contains_key(&mut self, key: Vec<u8>) -> Result<bool, ExecutionError> {
+        let promise = self.contains_key_new(key)?;
+        self.contains_key_wait(&promise)
+    }
+
+    /// Tests whether a key exists in the key-value store (new)
+    fn contains_key_new(&mut self, key: Vec<u8>) -> Result<Self::ContainsKey, ExecutionError>;
+
+    /// Tests whether a key exists in the key-value store (wait)
+    fn contains_key_wait(&mut self, promise: &Self::ContainsKey) -> Result<bool, ExecutionError>;
+
+    /// Reads several keys from the key-value store
+    #[cfg(feature = "test")]
+    fn read_multi_values_bytes(
+        &mut self,
+        keys: Vec<Vec<u8>>,
+    ) -> Result<Vec<Option<Vec<u8>>>, ExecutionError> {
+        let promise = self.read_multi_values_bytes_new(keys)?;
+        self.read_multi_values_bytes_wait(&promise)
+    }
+
+    /// Reads several keys from the key-value store (new)
+    fn read_multi_values_bytes_new(
+        &mut self,
+        keys: Vec<Vec<u8>>,
+    ) -> Result<Self::ReadMultiValuesBytes, ExecutionError>;
+
+    /// Reads several keys from the key-value store (wait)
+    fn read_multi_values_bytes_wait(
+        &mut self,
+        promise: &Self::ReadMultiValuesBytes,
+    ) -> Result<Vec<Option<Vec<u8>>>, ExecutionError>;
+
     /// Unlocks the view user state and allows reading/loading again (new)
     fn unlock_new(&mut self) -> Result<Self::Unlock, ExecutionError>;
 
     /// Unlocks the view user state and allows reading/loading again (wait)
     fn unlock_wait(&mut self, promise: &Self::Unlock) -> Result<(), ExecutionError>;
+
+    /// Writes the batch and then unlock.
+    ///
+    /// Hack: This fails for services.
+    fn write_batch_and_unlock(&mut self, batch: Batch) -> Result<(), ExecutionError>;
 
     /// Reads the key from the key-value store
     #[cfg(feature = "test")]
@@ -394,19 +471,11 @@ pub trait BaseRuntime: Send + Sync {
 }
 
 pub trait ServiceRuntime: BaseRuntime {
-    type TryQueryApplication;
-
-    /// Queries another application (new).
-    fn try_query_application_new(
+    /// Queries another application.
+    fn try_query_application(
         &mut self,
         queried_id: UserApplicationId,
         argument: Vec<u8>,
-    ) -> Result<Self::TryQueryApplication, ExecutionError>;
-
-    /// Queries another application (wait).
-    fn try_query_application_wait(
-        &mut self,
-        promise: &Self::TryQueryApplication,
     ) -> Result<Vec<u8>, ExecutionError>;
 }
 
@@ -432,9 +501,6 @@ pub trait ContractRuntime: BaseRuntime {
     // TODO(#1152): remove
     /// Saves the application state and allows reading/loading the state again.
     fn save_and_unlock_my_state(&mut self, state: Vec<u8>) -> Result<bool, ExecutionError>;
-
-    /// Writes the batch and then unlock.
-    fn write_batch_and_unlock(&mut self, batch: Batch) -> Result<(), ExecutionError>;
 
     /// Calls another application. Forwarded sessions will now be visible to
     /// `callee_id` (but not to the caller any more).
@@ -520,8 +586,9 @@ pub struct RawOutgoingMessage<Message> {
     pub destination: Destination,
     /// Whether the message is authenticated.
     pub authenticated: bool,
-    /// Whether the message can be skipped by the receiver.
-    pub is_skippable: bool,
+    /// True if the message cannot be skipped or rejected by the receiver.
+    /// This only concerns certain system messages that cannot fail.
+    pub is_protected: bool,
     /// The message itself.
     pub message: Message,
 }
@@ -603,15 +670,17 @@ impl OperationContext {
 #[derive(Clone)]
 pub struct TestExecutionRuntimeContext {
     chain_id: ChainId,
+    execution_runtime_config: ExecutionRuntimeConfig,
     user_contracts: Arc<DashMap<UserApplicationId, UserContractCode>>,
     user_services: Arc<DashMap<UserApplicationId, UserServiceCode>>,
 }
 
 #[cfg(any(test, feature = "test"))]
 impl TestExecutionRuntimeContext {
-    fn new(chain_id: ChainId) -> Self {
+    fn new(chain_id: ChainId, execution_runtime_config: ExecutionRuntimeConfig) -> Self {
         Self {
             chain_id,
+            execution_runtime_config,
             user_contracts: Arc::default(),
             user_services: Arc::default(),
         }
@@ -623,6 +692,10 @@ impl TestExecutionRuntimeContext {
 impl ExecutionRuntimeContext for TestExecutionRuntimeContext {
     fn chain_id(&self) -> ChainId {
         self.chain_id
+    }
+
+    fn execution_runtime_config(&self) -> ExecutionRuntimeConfig {
+        self.execution_runtime_config
     }
 
     fn user_contracts(&self) -> &Arc<DashMap<UserApplicationId, UserContractCode>> {

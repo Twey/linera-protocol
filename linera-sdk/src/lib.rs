@@ -305,7 +305,7 @@ pub trait Service: WithServiceAbi + ServiceAbi {
     ) -> Result<Self::QueryResponse, Self::Error>;
 
     /// Queries another application.
-    async fn query_application<A: ServiceAbi + Send>(
+    fn query_application<A: ServiceAbi + Send>(
         application: ApplicationId<A>,
         query: &A::Query,
     ) -> Result<A::QueryResponse, Self::Error>
@@ -315,7 +315,6 @@ pub trait Service: WithServiceAbi + ServiceAbi {
         let query_bytes = serde_json::to_vec(&query)?;
         let response_bytes =
             crate::service::system_api::query_application(application.forget_abi(), &query_bytes)
-                .await
                 .map_err(String::from)?;
         let response = serde_json::from_slice(&response_bytes)?;
         Ok(response)
@@ -383,8 +382,6 @@ pub struct OutgoingMessage<Message> {
     pub destination: Destination,
     /// Whether the message is authenticated.
     pub authenticated: bool,
-    /// Whether the message can skipped by the receiving chain.
-    pub is_skippable: bool,
     /// The message itself.
     pub message: Message,
 }
@@ -417,11 +414,9 @@ impl<Message: Serialize + Debug + DeserializeOwned> ExecutionResult<Message> {
     /// Adds a message to the execution result.
     pub fn with_message(mut self, destination: impl Into<Destination>, message: Message) -> Self {
         let destination = destination.into();
-        let is_skippable = destination.is_channel();
         self.messages.push(OutgoingMessage {
             destination,
             authenticated: false,
-            is_skippable,
             message,
         });
         self
@@ -434,11 +429,9 @@ impl<Message: Serialize + Debug + DeserializeOwned> ExecutionResult<Message> {
         message: Message,
     ) -> Self {
         let destination = destination.into();
-        let is_skippable = destination.is_channel();
         self.messages.push(OutgoingMessage {
             destination,
             authenticated: true,
-            is_skippable,
             message,
         });
         self

@@ -5,8 +5,10 @@
 ///
 /// Generates the common code for contract system API types for all Wasm runtimes.
 macro_rules! impl_contract_system_api {
-    ($contract_system_api:ident, $trap:ty) => {
-        impl contract_system_api::ContractSystemApi for $contract_system_api {
+    ($trap:ty) => {
+        impl<T: crate::ContractRuntime + Send + Sync + 'static>
+            contract_system_api::ContractSystemApi for T
+        {
             type Error = ExecutionError;
 
             type Lock = <Self as BaseRuntime>::Lock;
@@ -130,14 +132,15 @@ macro_rules! impl_contract_system_api {
 ///
 /// Generates the common code for service system API types for all Wasm runtimes.
 macro_rules! impl_service_system_api {
-    ($service_system_api:ident, $trap:ty) => {
-        impl service_system_api::ServiceSystemApi for $service_system_api {
+    ($trap:ty) => {
+        impl<T: crate::ServiceRuntime + Send + Sync + 'static> service_system_api::ServiceSystemApi
+            for T
+        {
             type Error = ExecutionError;
 
             type Load = <Self as BaseRuntime>::Read;
             type Lock = <Self as BaseRuntime>::Lock;
             type Unlock = <Self as BaseRuntime>::Unlock;
-            type TryQueryApplication = <Self as ServiceRuntime>::TryQueryApplication;
 
             fn error_to_trap(&mut self, error: Self::Error) -> $trap {
                 error.into()
@@ -206,23 +209,12 @@ macro_rules! impl_service_system_api {
                     .map(Ok)
             }
 
-            fn try_query_application_new(
+            fn try_query_application(
                 &mut self,
                 application: service_system_api::ApplicationId,
                 argument: &[u8],
-            ) -> Result<Self::TryQueryApplication, Self::Error> {
-                ServiceRuntime::try_query_application_new(
-                    self,
-                    application.into(),
-                    argument.to_vec(),
-                )
-            }
-
-            fn try_query_application_wait(
-                &mut self,
-                promise: &Self::TryQueryApplication,
             ) -> Result<Result<Vec<u8>, String>, Self::Error> {
-                ServiceRuntime::try_query_application_wait(self, promise)
+                ServiceRuntime::try_query_application(self, application.into(), argument.to_vec())
                     // TODO(#1153): remove
                     .map(Ok)
             }
@@ -247,81 +239,16 @@ macro_rules! impl_service_system_api {
 }
 
 /// Generates an implementation of `ViewSystem` for the provided `view_system_api` type for
-/// application services.
-///
-/// Generates the common code for view system API types for all Wasm runtimes.
-macro_rules! impl_view_system_api_for_service {
-    ($view_system_api:ty, $trap:ty) => {
-        impl view_system_api::ViewSystemApi for $view_system_api {
-            type Error = ExecutionError;
-
-            type ReadValueBytes = <Self as BaseRuntime>::ReadValueBytes;
-            type FindKeys = <Self as BaseRuntime>::FindKeysByPrefix;
-            type FindKeyValues = <Self as BaseRuntime>::FindKeyValuesByPrefix;
-
-            fn error_to_trap(&mut self, error: Self::Error) -> $trap {
-                error.into()
-            }
-
-            fn read_value_bytes_new(
-                &mut self,
-                key: &[u8],
-            ) -> Result<Self::ReadValueBytes, Self::Error> {
-                BaseRuntime::read_value_bytes_new(self, key.to_vec())
-            }
-
-            fn read_value_bytes_wait(
-                &mut self,
-                promise: &Self::ReadValueBytes,
-            ) -> Result<Option<Vec<u8>>, Self::Error> {
-                BaseRuntime::read_value_bytes_wait(self, promise)
-            }
-
-            fn find_keys_new(&mut self, key_prefix: &[u8]) -> Result<Self::FindKeys, Self::Error> {
-                self.find_keys_by_prefix_new(key_prefix.to_vec())
-            }
-
-            fn find_keys_wait(
-                &mut self,
-                promise: &Self::FindKeys,
-            ) -> Result<Vec<Vec<u8>>, Self::Error> {
-                self.find_keys_by_prefix_wait(promise)
-            }
-
-            fn find_key_values_new(
-                &mut self,
-                key_prefix: &[u8],
-            ) -> Result<Self::FindKeyValues, Self::Error> {
-                self.find_key_values_by_prefix_new(key_prefix.to_vec())
-            }
-
-            fn find_key_values_wait(
-                &mut self,
-                promise: &Self::FindKeyValues,
-            ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Self::Error> {
-                self.find_key_values_by_prefix_wait(promise)
-            }
-
-            fn write_batch(
-                &mut self,
-                _operations: Vec<view_system_api::WriteOperation>,
-            ) -> Result<(), Self::Error> {
-                // Not calling the runtime to save time.
-                Err(ExecutionError::WriteAttemptToReadOnlyStorage)
-            }
-        }
-    };
-}
-
-/// Generates an implementation of `ViewSystem` for the provided `view_system_api` type for
-/// application contracts.
+/// applications.
 ///
 /// Generates the common code for view system API types for all WASM runtimes.
-macro_rules! impl_view_system_api_for_contract {
-    ($view_system_api:ty, $trap:ty) => {
-        impl view_system_api::ViewSystemApi for $view_system_api {
+macro_rules! impl_view_system_api {
+    ($trap:ty) => {
+        impl<T: crate::BaseRuntime + Send + Sync + 'static> view_system_api::ViewSystemApi for T {
             type Error = ExecutionError;
 
+            type ContainsKey = <Self as BaseRuntime>::ContainsKey;
+            type ReadMultiValuesBytes = <Self as BaseRuntime>::ReadMultiValuesBytes;
             type ReadValueBytes = <Self as BaseRuntime>::ReadValueBytes;
             type FindKeys = <Self as BaseRuntime>::FindKeysByPrefix;
             type FindKeyValues = <Self as BaseRuntime>::FindKeyValuesByPrefix;
@@ -330,18 +257,44 @@ macro_rules! impl_view_system_api_for_contract {
                 error.into()
             }
 
+            fn contains_key_new(&mut self, key: &[u8]) -> Result<Self::ContainsKey, Self::Error> {
+                self.contains_key_new(key.to_vec())
+            }
+
+            fn contains_key_wait(
+                &mut self,
+                promise: &Self::ContainsKey,
+            ) -> Result<bool, Self::Error> {
+                self.contains_key_wait(promise)
+            }
+
+            fn read_multi_values_bytes_new(
+                &mut self,
+                keys: Vec<&[u8]>,
+            ) -> Result<Self::ReadMultiValuesBytes, Self::Error> {
+                let keys = keys.into_iter().map(Vec::from).collect();
+                self.read_multi_values_bytes_new(keys)
+            }
+
+            fn read_multi_values_bytes_wait(
+                &mut self,
+                promise: &Self::ReadMultiValuesBytes,
+            ) -> Result<Vec<Option<Vec<u8>>>, Self::Error> {
+                self.read_multi_values_bytes_wait(promise)
+            }
+
             fn read_value_bytes_new(
                 &mut self,
                 key: &[u8],
             ) -> Result<Self::ReadValueBytes, Self::Error> {
-                BaseRuntime::read_value_bytes_new(self, key.to_vec())
+                self.read_value_bytes_new(key.to_vec())
             }
 
             fn read_value_bytes_wait(
                 &mut self,
                 promise: &Self::ReadValueBytes,
             ) -> Result<Option<Vec<u8>>, Self::Error> {
-                BaseRuntime::read_value_bytes_wait(self, promise)
+                self.read_value_bytes_wait(promise)
             }
 
             fn find_keys_new(&mut self, key_prefix: &[u8]) -> Result<Self::FindKeys, Self::Error> {
@@ -374,7 +327,7 @@ macro_rules! impl_view_system_api_for_contract {
                 &mut self,
                 operations: Vec<view_system_api::WriteOperation>,
             ) -> Result<(), Self::Error> {
-                let mut batch = Batch::new();
+                let mut batch = linera_views::batch::Batch::new();
                 for operation in operations {
                     match operation {
                         view_system_api::WriteOperation::Delete(key) => {
@@ -388,6 +341,7 @@ macro_rules! impl_view_system_api_for_contract {
                         }
                     }
                 }
+                // Hack: The following is a no-op for services.
                 self.write_batch_and_unlock(batch)
             }
         }

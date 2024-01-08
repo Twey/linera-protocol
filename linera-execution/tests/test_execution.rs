@@ -12,21 +12,21 @@ use linera_base::{
     ensure,
     identifiers::{ChainDescription, ChainId, Owner, SessionId},
 };
-use linera_execution::{
-    policy::ResourceControlPolicy,
-    runtime_actor::{ContractRuntimeSender, ServiceRuntimeSender},
-    *,
-};
+use linera_execution::{policy::ResourceControlPolicy, ContractSyncRuntime, ServiceSyncRuntime, *};
 use linera_views::{batch::Batch, common::Context, memory::MemoryContext, views::View};
 use std::sync::Arc;
+use test_case::test_case;
 
 #[tokio::test]
 async fn test_missing_bytecode_for_user_application() -> anyhow::Result<()> {
     let mut state = SystemExecutionState::default();
     state.description = Some(ChainDescription::Root(0));
     let mut view =
-        ExecutionStateView::<MemoryContext<TestExecutionRuntimeContext>>::from_system_state(state)
-            .await;
+        ExecutionStateView::<MemoryContext<TestExecutionRuntimeContext>>::from_system_state(
+            state,
+            Default::default(),
+        )
+        .await;
 
     let app_desc = create_dummy_user_application_description();
     let app_id = view
@@ -67,8 +67,20 @@ async fn test_missing_bytecode_for_user_application() -> anyhow::Result<()> {
     Ok(())
 }
 
-struct TestApplication {
+#[derive(Clone)]
+struct TestModule {
     owner: Owner,
+}
+
+struct TestApplication<Runtime> {
+    owner: Owner,
+    runtime: Runtime,
+}
+
+impl TestModule {
+    fn new(owner: Owner) -> Self {
+        Self { owner }
+    }
 }
 
 /// A fake operation for the [`TestApplication`] which can be easily "serialized" into a single
@@ -80,12 +92,26 @@ enum TestOperation {
     FailingCrossApplicationCall,
 }
 
-impl UserContract for TestApplication {
+impl UserContractModule for TestModule {
+    fn instantiate(
+        &self,
+        runtime: ContractSyncRuntime,
+    ) -> Result<Box<dyn UserContract + Send + Sync + 'static>, ExecutionError> {
+        Ok(Box::new(TestApplication {
+            owner: self.owner,
+            runtime,
+        }))
+    }
+}
+
+impl<Runtime> UserContract for TestApplication<Runtime>
+where
+    Runtime: ContractRuntime,
+{
     /// Nothing needs to be done during initialization.
     fn initialize(
-        &self,
+        &mut self,
         context: OperationContext,
-        _runtime_sender: ContractRuntimeSender,
         _argument: Vec<u8>,
     ) -> Result<RawExecutionResult<Vec<u8>>, ExecutionError> {
         assert_eq!(context.authenticated_signer, Some(self.owner));
@@ -97,29 +123,29 @@ impl UserContract for TestApplication {
     /// Calls itself during the operation, opening a session. The session is intentionally
     /// leaked if the test operation is [`TestOperation::LeakingSession`].
     fn execute_operation(
-        &self,
+        &mut self,
         context: OperationContext,
-        mut runtime_sender: ContractRuntimeSender,
         operation: Vec<u8>,
     ) -> Result<RawExecutionResult<Vec<u8>>, ExecutionError> {
         assert_eq!(operation.len(), 1);
         // Who we are.
         assert_eq!(context.authenticated_signer, Some(self.owner));
-        let app_id = runtime_sender.application_id()?;
+        let app_id = self.runtime.application_id()?;
 
         // Modify our state.
         let chosen_key = vec![0];
-        runtime_sender.lock()?;
-        let mut state = runtime_sender
+        self.runtime.lock()?;
+        let mut state = self
+            .runtime
             .read_value_bytes(chosen_key.clone())?
             .unwrap_or_default();
         state.extend(operation.clone());
         let mut batch = Batch::new();
         batch.put_key_value_bytes(chosen_key, state);
-        runtime_sender.write_batch_and_unlock(batch)?;
+        self.runtime.write_batch_and_unlock(batch)?;
 
         // Call ourselves after unlocking the state => ok.
-        let call_result = runtime_sender.try_call_application(
+        let call_result = self.runtime.try_call_application(
             /* authenticated */ true,
             app_id,
             operation.clone(),
@@ -130,7 +156,7 @@ impl UserContract for TestApplication {
         if operation[0] != TestOperation::LeakingSession as u8 {
             // Call the session to close it.
             let session_id = call_result.sessions[0];
-            runtime_sender.try_call_session(
+            self.runtime.try_call_session(
                 /* authenticated */ false,
                 session_id,
                 vec![],
@@ -142,34 +168,32 @@ impl UserContract for TestApplication {
 
     /// Attempts to call ourself while the state is locked.
     fn execute_message(
-        &self,
+        &mut self,
         context: MessageContext,
-        mut runtime_sender: ContractRuntimeSender,
         message: Vec<u8>,
     ) -> Result<RawExecutionResult<Vec<u8>>, ExecutionError> {
         assert_eq!(message.len(), 1);
         // Who we are.
         assert_eq!(context.authenticated_signer, Some(self.owner));
-        let app_id = runtime_sender.application_id()?;
-        runtime_sender.lock()?;
+        let app_id = self.runtime.application_id()?;
+        self.runtime.lock()?;
 
         // Call ourselves while the state is locked => not ok.
-        runtime_sender.try_call_application(
+        self.runtime.try_call_application(
             /* authenticated */ true,
             app_id,
             message,
             vec![],
         )?;
-        runtime_sender.unlock()?;
+        self.runtime.unlock()?;
 
         Ok(RawExecutionResult::default())
     }
 
     /// Creates a session.
     fn handle_application_call(
-        &self,
+        &mut self,
         context: CalleeContext,
-        _runtime_sender: ContractRuntimeSender,
         argument: Vec<u8>,
         _forwarded_sessions: Vec<SessionId>,
     ) -> Result<ApplicationCallResult, ExecutionError> {
@@ -187,9 +211,8 @@ impl UserContract for TestApplication {
 
     /// Closes the session.
     fn handle_session_call(
-        &self,
+        &mut self,
         context: CalleeContext,
-        _runtime_sender: ContractRuntimeSender,
         session_state: Vec<u8>,
         _argument: Vec<u8>,
         _forwarded_sessions: Vec<SessionId>,
@@ -205,35 +228,56 @@ impl UserContract for TestApplication {
     }
 }
 
-impl UserService for TestApplication {
+impl UserServiceModule for TestModule {
+    fn instantiate(
+        &self,
+        runtime: ServiceSyncRuntime,
+    ) -> Result<Box<dyn UserService + Send + Sync + 'static>, ExecutionError> {
+        Ok(Box::new(TestApplication {
+            owner: self.owner,
+            runtime,
+        }))
+    }
+}
+
+impl<Runtime> UserService for TestApplication<Runtime>
+where
+    Runtime: ServiceRuntime,
+{
     /// Returns the application state.
     fn handle_query(
-        &self,
+        &mut self,
         _context: QueryContext,
-        mut runtime_sender: ServiceRuntimeSender,
         _argument: Vec<u8>,
     ) -> Result<Vec<u8>, ExecutionError> {
         let chosen_key = vec![0];
-        runtime_sender.lock()?;
+        self.runtime.lock()?;
 
-        let state = runtime_sender
+        let state = self
+            .runtime
             .read_value_bytes(chosen_key)?
             .unwrap_or_default();
 
-        runtime_sender.unlock()?;
+        self.runtime.unlock()?;
 
         Ok(state)
     }
 }
 
+#[test_case(ExecutionRuntimeConfig::Synchronous ; "synchronous")]
 #[tokio::test]
-async fn test_simple_user_operation() -> anyhow::Result<()> {
+async fn test_simple_user_operation(
+    execution_runtime_config: ExecutionRuntimeConfig,
+) -> anyhow::Result<()> {
     let owner = Owner::from(PublicKey::debug(0));
     let mut state = SystemExecutionState::default();
     state.description = Some(ChainDescription::Root(0));
     let mut view =
-        ExecutionStateView::<MemoryContext<TestExecutionRuntimeContext>>::from_system_state(state)
-            .await;
+        ExecutionStateView::<MemoryContext<TestExecutionRuntimeContext>>::from_system_state(
+            state,
+            execution_runtime_config,
+        )
+        .await;
     let app_desc = create_dummy_user_application_description();
     let app_id = view
         .system
@@ -243,11 +287,11 @@ async fn test_simple_user_operation() -> anyhow::Result<()> {
     view.context()
         .extra()
         .user_contracts()
-        .insert(app_id, Arc::new(TestApplication { owner }));
+        .insert(app_id, Arc::new(TestModule::new(owner)));
     view.context()
         .extra()
         .user_services()
-        .insert(app_id, Arc::new(TestApplication { owner }));
+        .insert(app_id, Arc::new(TestModule::new(owner)));
 
     let context = OperationContext {
         chain_id: ChainId::root(0),
@@ -303,14 +347,20 @@ async fn test_simple_user_operation() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test_case(ExecutionRuntimeConfig::Synchronous ; "synchronous")]
 #[tokio::test]
-async fn test_simple_user_operation_with_leaking_session() -> anyhow::Result<()> {
+async fn test_simple_user_operation_with_leaking_session(
+    execution_runtime_config: ExecutionRuntimeConfig,
+) -> anyhow::Result<()> {
     let owner = Owner::from(PublicKey::debug(0));
     let mut state = SystemExecutionState::default();
     state.description = Some(ChainDescription::Root(0));
     let mut view =
-        ExecutionStateView::<MemoryContext<TestExecutionRuntimeContext>>::from_system_state(state)
-            .await;
+        ExecutionStateView::<MemoryContext<TestExecutionRuntimeContext>>::from_system_state(
+            state,
+            execution_runtime_config,
+        )
+        .await;
     let app_desc = create_dummy_user_application_description();
     let app_id = view
         .system
@@ -320,7 +370,7 @@ async fn test_simple_user_operation_with_leaking_session() -> anyhow::Result<()>
     view.context()
         .extra()
         .user_contracts()
-        .insert(app_id, Arc::new(TestApplication { owner }));
+        .insert(app_id, Arc::new(TestModule::new(owner)));
 
     let context = OperationContext {
         chain_id: ChainId::root(0),
@@ -343,7 +393,10 @@ async fn test_simple_user_operation_with_leaking_session() -> anyhow::Result<()>
         )
         .await;
 
-    assert!(matches!(result, Err(ExecutionError::SessionWasNotClosed)));
+    assert!(matches!(
+        result,
+        Err(ExecutionError::SessionWasNotClosed(_))
+    ));
     Ok(())
 }
 
@@ -351,15 +404,21 @@ async fn test_simple_user_operation_with_leaking_session() -> anyhow::Result<()>
 ///
 /// Sends an operation to the [`TestApplication`] requesting it to fail a cross-application call.
 /// It is then forwarded to the reentrant call, where the cross-application call handler fails and
-/// the execution error should be handled correctly.
+/// the execution error should be handled correctly (without panicking).
+#[test_case(ExecutionRuntimeConfig::Synchronous ; "synchronous")]
 #[tokio::test]
-async fn test_cross_application_error() -> anyhow::Result<()> {
+async fn test_cross_application_error(
+    execution_runtime_config: ExecutionRuntimeConfig,
+) -> anyhow::Result<()> {
     let owner = Owner::from(PublicKey::debug(0));
     let mut state = SystemExecutionState::default();
     state.description = Some(ChainDescription::Root(0));
     let mut view =
-        ExecutionStateView::<MemoryContext<TestExecutionRuntimeContext>>::from_system_state(state)
-            .await;
+        ExecutionStateView::<MemoryContext<TestExecutionRuntimeContext>>::from_system_state(
+            state,
+            execution_runtime_config,
+        )
+        .await;
     let app_desc = create_dummy_user_application_description();
     let app_id = view
         .system
@@ -369,11 +428,11 @@ async fn test_cross_application_error() -> anyhow::Result<()> {
     view.context()
         .extra()
         .user_contracts()
-        .insert(app_id, Arc::new(TestApplication { owner }));
+        .insert(app_id, Arc::new(TestModule::new(owner)));
     view.context()
         .extra()
         .user_services()
-        .insert(app_id, Arc::new(TestApplication { owner }));
+        .insert(app_id, Arc::new(TestModule::new(owner)));
 
     let context = OperationContext {
         chain_id: ChainId::root(0),
@@ -384,8 +443,8 @@ async fn test_cross_application_error() -> anyhow::Result<()> {
     };
     let mut tracker = ResourceTracker::default();
     let policy = ResourceControlPolicy::default();
-    let result = view
-        .execute_operation(
+    assert!(matches!(
+        view.execute_operation(
             context,
             Operation::User {
                 application_id: app_id,
@@ -394,15 +453,9 @@ async fn test_cross_application_error() -> anyhow::Result<()> {
             &policy,
             &mut tracker,
         )
-        .await
-        .unwrap();
-    assert_eq!(
-        result,
-        vec![ExecutionResult::User(
-            app_id,
-            RawExecutionResult::default().with_authenticated_signer(Some(owner))
-        ),]
-    );
+        .await,
+        Err(ExecutionError::UserError(_))
+    ));
 
     Ok(())
 }

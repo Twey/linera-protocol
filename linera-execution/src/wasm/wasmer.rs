@@ -32,25 +32,20 @@ mod conversions_from_wit;
 #[path = "conversions_to_wit.rs"]
 mod conversions_to_wit;
 
-use super::{
-    common::{self, ApplicationRuntimeContext, WasmRuntimeContext},
-    module_cache::ModuleCache,
-    ApplicationCallResult, SessionCallResult, WasmContract, WasmExecutionError, WasmService,
-};
+use super::{module_cache::ModuleCache, WasmExecutionError};
 use crate::{
-    BaseRuntime, Bytecode, CalleeContext, ContractRuntime, ContractRuntimeSender, ExecutionError,
+    wasm::{WasmContractModule, WasmServiceModule},
+    ApplicationCallResult, BaseRuntime, Bytecode, CalleeContext, ContractRuntime, ExecutionError,
     MessageContext, OperationContext, QueryContext, RawExecutionResult, ServiceRuntime,
-    ServiceRuntimeSender,
+    SessionCallResult,
 };
 use bytes::Bytes;
-use linera_base::identifiers::SessionId;
-use linera_views::batch::Batch;
-use once_cell::sync::Lazy;
-use std::{marker::PhantomData, sync::Arc};
+use linera_base::{identifiers::SessionId, sync::Lazy};
+use std::{marker::Unpin, sync::Arc};
 use tokio::sync::Mutex;
 use wasmer::{
     imports, wasmparser::Operator, CompilerConfig, Engine, EngineBuilder, Instance, Module,
-    RuntimeError, Singlepass, Store,
+    Singlepass, Store,
 };
 use wasmer_middlewares::metering::{self, Metering, MeteringPoints};
 use wit_bindgen_host_wasmer_rust::Le;
@@ -67,106 +62,98 @@ static CONTRACT_CACHE: Lazy<Mutex<ModuleCache<CachedContractModule>>> = Lazy::ne
 /// A cache of compiled service modules.
 static SERVICE_CACHE: Lazy<Mutex<ModuleCache<Module>>> = Lazy::new(Mutex::default);
 
-/// Type representing the [Wasmer](https://wasmer.io/) contract runtime.
-pub struct Contract {
-    contract: contract::Contract,
+/// Type representing a running [Wasmer](https://wasmer.io/) contract.
+pub(crate) struct WasmerContractInstance<Runtime> {
+    /// The application type.
+    application: contract::Contract,
+
+    /// The application's memory state.
+    store: Store,
+
+    /// The system runtime.
+    runtime: Runtime,
+
+    /// The Wasmer instance.
+    instance: Instance,
 }
 
-impl ApplicationRuntimeContext for Contract {
-    type Store = Store;
-    type Error = RuntimeError;
-    type Extra = WasmerContractExtra;
+impl<Runtime> WasmerContractInstance<Runtime>
+where
+    Runtime: ContractRuntime + Send + Unpin,
+{
+    fn configure_initial_fuel(&mut self) -> Result<(), ExecutionError> {
+        let remaining_points = self.runtime.remaining_fuel()?;
 
-    fn configure_initial_fuel(context: &mut WasmRuntimeContext<Self>) -> Result<(), Self::Error> {
-        let remaining_points = context.extra.runtime_sender.remaining_fuel()?;
-
-        metering::set_remaining_points(
-            &mut context.store,
-            &context.extra.instance,
-            remaining_points,
-        );
+        metering::set_remaining_points(&mut self.store, &self.instance, remaining_points);
 
         Ok(())
     }
 
-    fn persist_remaining_fuel(context: &mut WasmRuntimeContext<Self>) -> Result<(), Self::Error> {
-        let remaining_fuel =
-            match metering::get_remaining_points(&mut context.store, &context.extra.instance) {
-                MeteringPoints::Exhausted => 0,
-                MeteringPoints::Remaining(fuel) => fuel,
-            };
+    fn persist_remaining_fuel(&mut self) -> Result<(), ExecutionError> {
+        let remaining_fuel = match metering::get_remaining_points(&mut self.store, &self.instance) {
+            MeteringPoints::Exhausted => 0,
+            MeteringPoints::Remaining(fuel) => fuel,
+        };
 
-        context
-            .extra
-            .runtime_sender
-            .set_remaining_fuel(remaining_fuel)?;
-
-        Ok(())
+        self.runtime.set_remaining_fuel(remaining_fuel)
     }
 }
 
-/// Type representing the [Wasmer](https://wasmer.io/) service runtime.
-pub struct Service {
-    service: service::Service,
+/// Type representing a running [Wasmer](https://wasmer.io/) service.
+pub struct WasmerServiceInstance {
+    /// The application type.
+    application: service::Service,
+
+    /// The application's memory state.
+    store: Store,
 }
 
-impl ApplicationRuntimeContext for Service {
-    type Store = Store;
-    type Error = RuntimeError;
-    type Extra = ();
-
-    fn configure_initial_fuel(_context: &mut WasmRuntimeContext<Self>) -> Result<(), Self::Error> {
-        Ok(())
-    }
-
-    fn persist_remaining_fuel(_context: &mut WasmRuntimeContext<Self>) -> Result<(), Self::Error> {
-        Ok(())
-    }
-}
-
-impl WasmContract {
-    /// Creates a new [`WasmContract`] using Wasmer with the provided bytecodes.
-    pub async fn new_with_wasmer(contract_bytecode: Bytecode) -> Result<Self, WasmExecutionError> {
+impl WasmContractModule {
+    /// Creates a new [`WasmContractModule`] using Wasmer with the provided bytecodes.
+    pub async fn from_wasmer(contract_bytecode: Bytecode) -> Result<Self, WasmExecutionError> {
         let mut contract_cache = CONTRACT_CACHE.lock().await;
         let (engine, module) = contract_cache
             .get_or_insert_with(contract_bytecode, CachedContractModule::new)
             .map_err(WasmExecutionError::LoadContractModule)?
             .create_execution_instance()
             .map_err(WasmExecutionError::LoadContractModule)?;
-
-        Ok(WasmContract::Wasmer { engine, module })
+        Ok(WasmContractModule::Wasmer { engine, module })
     }
+}
 
+impl<Runtime> WasmerContractInstance<Runtime>
+where
+    Runtime: ContractRuntime + Clone + Send + Sync + Unpin + 'static,
+{
     /// Prepares a runtime instance to call into the Wasm contract.
-    pub fn prepare_contract_runtime_with_wasmer(
+    pub fn prepare(
         contract_engine: &Engine,
         contract_module: &Module,
-        runtime_sender: ContractRuntimeSender,
-    ) -> Result<WasmRuntimeContext<Contract>, WasmExecutionError> {
+        runtime: Runtime,
+    ) -> Result<Self, WasmExecutionError> {
         let mut store = Store::new(contract_engine);
         let mut imports = imports! {};
         let system_api_setup =
-            contract_system_api::add_to_imports(&mut store, &mut imports, runtime_sender.clone());
+            contract_system_api::add_to_imports(&mut store, &mut imports, runtime.clone());
         let views_api_setup =
-            view_system_api::add_to_imports(&mut store, &mut imports, runtime_sender.clone());
-        let (contract, instance) =
+            view_system_api::add_to_imports(&mut store, &mut imports, runtime.clone());
+        let (application, instance) =
             contract::Contract::instantiate(&mut store, contract_module, &mut imports)
                 .map_err(WasmExecutionError::LoadContractModule)?;
-        let application = Contract { contract };
 
         system_api_setup(&instance, &store).map_err(WasmExecutionError::LoadContractModule)?;
         views_api_setup(&instance, &store).map_err(WasmExecutionError::LoadContractModule)?;
 
-        Ok(WasmRuntimeContext {
+        Ok(Self {
             application,
             store,
-            extra: WasmerContractExtra {
-                runtime_sender,
-                instance,
-            },
+            runtime,
+            instance,
         })
     }
+}
 
+impl WasmContractModule {
     /// Calculates the fuel cost of a WebAssembly [`Operator`].
     ///
     /// The rules try to follow the hardcoded [rules in the Wasmtime runtime
@@ -185,9 +172,9 @@ impl WasmContract {
     }
 }
 
-impl WasmService {
-    /// Creates a new [`WasmService`] using Wasmer with the provided bytecodes.
-    pub async fn new_with_wasmer(service_bytecode: Bytecode) -> Result<Self, WasmExecutionError> {
+impl WasmServiceModule {
+    /// Creates a new [`WasmServiceModule`] using Wasmer with the provided bytecodes.
+    pub async fn from_wasmer(service_bytecode: Bytecode) -> Result<Self, WasmExecutionError> {
         let mut service_cache = SERVICE_CACHE.lock().await;
         let module = service_cache
             .get_or_insert_with(service_bytecode, |bytecode| {
@@ -195,152 +182,160 @@ impl WasmService {
                     .map_err(wit_bindgen_host_wasmer_rust::anyhow::Error::from)
             })
             .map_err(WasmExecutionError::LoadServiceModule)?;
-
-        Ok(WasmService::Wasmer { module })
+        Ok(WasmServiceModule::Wasmer { module })
     }
+}
 
+impl WasmerServiceInstance {
     /// Prepares a runtime instance to call into the Wasm service.
-    pub fn prepare_service_runtime_with_wasmer(
+    pub fn prepare<Runtime>(
         service_module: &Module,
-        runtime_sender: ServiceRuntimeSender,
-    ) -> Result<WasmRuntimeContext<Service>, WasmExecutionError> {
+        runtime: Runtime,
+    ) -> Result<Self, WasmExecutionError>
+    where
+        Runtime: ServiceRuntime + Clone + Send + Sync + Unpin + 'static,
+    {
         let mut store = Store::new(&*SERVICE_ENGINE);
         let mut imports = imports! {};
         let system_api_setup =
-            service_system_api::add_to_imports(&mut store, &mut imports, runtime_sender.clone());
-        let views_api_setup =
-            view_system_api::add_to_imports(&mut store, &mut imports, runtime_sender);
-        let (service, instance) =
+            service_system_api::add_to_imports(&mut store, &mut imports, runtime.clone());
+        let views_api_setup = view_system_api::add_to_imports(&mut store, &mut imports, runtime);
+        let (application, instance) =
             service::Service::instantiate(&mut store, service_module, &mut imports)
                 .map_err(WasmExecutionError::LoadServiceModule)?;
-        let application = Service { service };
 
         system_api_setup(&instance, &store).map_err(WasmExecutionError::LoadServiceModule)?;
         views_api_setup(&instance, &store).map_err(WasmExecutionError::LoadServiceModule)?;
 
-        Ok(WasmRuntimeContext {
-            application,
-            store,
-            extra: (),
-        })
+        Ok(Self { application, store })
     }
 }
 
-impl common::Contract for Contract {
+impl<Runtime> crate::UserContract for WasmerContractInstance<Runtime>
+where
+    Runtime: ContractRuntime + Send + Unpin,
+{
     fn initialize(
-        &self,
-        store: &mut Store,
+        &mut self,
         context: OperationContext,
         argument: Vec<u8>,
-    ) -> Result<Result<RawExecutionResult<Vec<u8>>, String>, RuntimeError> {
-        contract::Contract::initialize(&self.contract, store, context.into(), &argument)
-            .map(|inner| inner.map(RawExecutionResult::from))
+    ) -> Result<RawExecutionResult<Vec<u8>>, ExecutionError> {
+        self.configure_initial_fuel()?;
+        let result = contract::Contract::initialize(
+            &self.application,
+            &mut self.store,
+            context.into(),
+            &argument,
+        )
+        .map(|inner| inner.map(RawExecutionResult::from));
+        self.persist_remaining_fuel()?;
+        result?.map_err(ExecutionError::UserError)
     }
 
     fn execute_operation(
-        &self,
-        store: &mut Store,
+        &mut self,
         context: OperationContext,
         operation: Vec<u8>,
-    ) -> Result<Result<RawExecutionResult<Vec<u8>>, String>, RuntimeError> {
-        contract::Contract::execute_operation(&self.contract, store, context.into(), &operation)
-            .map(|inner| inner.map(RawExecutionResult::from))
+    ) -> Result<RawExecutionResult<Vec<u8>>, ExecutionError> {
+        self.configure_initial_fuel()?;
+        let result = contract::Contract::execute_operation(
+            &self.application,
+            &mut self.store,
+            context.into(),
+            &operation,
+        )
+        .map(|inner| inner.map(RawExecutionResult::from));
+        self.persist_remaining_fuel()?;
+        result?.map_err(ExecutionError::UserError)
     }
 
     fn execute_message(
-        &self,
-        store: &mut Store,
+        &mut self,
         context: MessageContext,
         message: Vec<u8>,
-    ) -> Result<Result<RawExecutionResult<Vec<u8>>, String>, RuntimeError> {
-        contract::Contract::execute_message(&self.contract, store, context.into(), &message)
-            .map(|inner| inner.map(RawExecutionResult::from))
+    ) -> Result<RawExecutionResult<Vec<u8>>, ExecutionError> {
+        self.configure_initial_fuel()?;
+        let result = contract::Contract::execute_message(
+            &self.application,
+            &mut self.store,
+            context.into(),
+            &message,
+        )
+        .map(|inner| inner.map(RawExecutionResult::from));
+        self.persist_remaining_fuel()?;
+        result?.map_err(ExecutionError::UserError)
     }
 
     fn handle_application_call(
-        &self,
-        store: &mut Store,
+        &mut self,
         context: CalleeContext,
         argument: Vec<u8>,
         forwarded_sessions: Vec<SessionId>,
-    ) -> Result<Result<ApplicationCallResult, String>, RuntimeError> {
+    ) -> Result<ApplicationCallResult, ExecutionError> {
         let forwarded_sessions = forwarded_sessions
             .into_iter()
             .map(contract::SessionId::from)
             .collect::<Vec<_>>();
 
-        contract::Contract::handle_application_call(
-            &self.contract,
-            store,
+        self.configure_initial_fuel()?;
+        let result = contract::Contract::handle_application_call(
+            &self.application,
+            &mut self.store,
             context.into(),
             &argument,
             &forwarded_sessions,
         )
-        .map(|inner| inner.map(ApplicationCallResult::from))
+        .map(|inner| inner.map(ApplicationCallResult::from));
+        self.persist_remaining_fuel()?;
+        result?.map_err(ExecutionError::UserError)
     }
 
     fn handle_session_call(
-        &self,
-        store: &mut Store,
+        &mut self,
         context: CalleeContext,
         session: Vec<u8>,
         argument: Vec<u8>,
         forwarded_sessions: Vec<SessionId>,
-    ) -> Result<Result<(SessionCallResult, Vec<u8>), String>, RuntimeError> {
+    ) -> Result<(SessionCallResult, Vec<u8>), ExecutionError> {
         let forwarded_sessions = forwarded_sessions
             .into_iter()
             .map(contract::SessionId::from)
             .collect::<Vec<_>>();
 
-        contract::Contract::handle_session_call(
-            &self.contract,
-            store,
+        self.configure_initial_fuel()?;
+        let result = contract::Contract::handle_session_call(
+            &self.application,
+            &mut self.store,
             context.into(),
             &session,
             &argument,
             &forwarded_sessions,
         )
-        .map(|inner| inner.map(<(SessionCallResult, Vec<u8>)>::from))
+        .map(|inner| inner.map(<(SessionCallResult, Vec<u8>)>::from));
+        self.persist_remaining_fuel()?;
+        result?.map_err(ExecutionError::UserError)
     }
 }
 
-impl common::Service for Service {
+impl crate::UserService for WasmerServiceInstance {
     fn handle_query(
-        &self,
-        store: &mut Store,
+        &mut self,
         context: QueryContext,
         argument: Vec<u8>,
-    ) -> Result<Result<Vec<u8>, String>, RuntimeError> {
-        service::Service::handle_query(&self.service, store, context.into(), &argument)
+    ) -> Result<Vec<u8>, ExecutionError> {
+        service::Service::handle_query(
+            &self.application,
+            &mut self.store,
+            context.into(),
+            &argument,
+        )?
+        .map_err(ExecutionError::UserError)
     }
 }
 
-impl_contract_system_api!(ContractRuntimeSender, wasmer::RuntimeError);
-impl_service_system_api!(ServiceRuntimeSender, wasmer::RuntimeError);
-impl_view_system_api_for_contract!(ContractRuntimeSender, wasmer::RuntimeError);
-impl_view_system_api_for_service!(ServiceRuntimeSender, wasmer::RuntimeError);
-
-/// Extra parameters necessary when cleaning up after contract execution.
-pub struct WasmerContractExtra {
-    runtime_sender: ContractRuntimeSender,
-    instance: Instance,
-}
-
-/// A guard to unsure that the [`ContractRuntime`] trait object isn't called after it's no longer
-/// borrowed.
-pub struct RuntimeGuard<'runtime, S> {
-    runtime: Arc<Mutex<Option<S>>>,
-    _lifetime: PhantomData<&'runtime ()>,
-}
-
-impl<S> Drop for RuntimeGuard<'_, S> {
-    fn drop(&mut self) {
-        self.runtime
-            .try_lock()
-            .expect("Guard dropped while runtime is still in use")
-            .take();
-    }
-}
+impl_contract_system_api!(wasmer::RuntimeError);
+impl_service_system_api!(wasmer::RuntimeError);
+impl_view_system_api!(wasmer::RuntimeError);
 
 impl From<ExecutionError> for wasmer::RuntimeError {
     fn from(error: ExecutionError) -> Self {
@@ -377,7 +372,7 @@ impl CachedContractModule {
 
     /// Creates a new [`Engine`] to compile a contract bytecode.
     fn create_compilation_engine() -> Engine {
-        let metering = Arc::new(Metering::new(0, WasmContract::operation_cost));
+        let metering = Arc::new(Metering::new(0, WasmContractModule::operation_cost));
         let mut compiler_config = Singlepass::default();
         compiler_config.push_middleware(metering);
         compiler_config.canonicalize_nans(true);

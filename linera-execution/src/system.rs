@@ -394,8 +394,8 @@ pub enum SystemExecutionError {
     #[error(transparent)]
     ViewError(#[from] ViewError),
 
-    #[error("Invalid new chain id: {0}")]
-    InvalidNewChainId(ChainId),
+    #[error("Incorrect chain id: {0}")]
+    IncorrectChainId(ChainId),
     #[error("Invalid admin id in new chain: {0}")]
     InvalidNewChainAdminId(ChainId),
     #[error("Invalid committees")]
@@ -517,7 +517,7 @@ where
                 let e1 = RawOutgoingMessage {
                     destination: Destination::Recipient(child_id),
                     authenticated: false,
-                    is_skippable: false,
+                    is_protected: true,
                     message: SystemMessage::OpenChain {
                         ownership: ownership.clone(),
                         committees: committees.clone(),
@@ -533,7 +533,7 @@ where
                 let e2 = RawOutgoingMessage {
                     destination: Destination::Recipient(admin_id),
                     authenticated: false,
-                    is_skippable: false,
+                    is_protected: true,
                     message: SystemMessage::Subscribe {
                         id: child_id,
                         subscription,
@@ -566,7 +566,7 @@ where
                         let message = RawOutgoingMessage {
                             destination: Destination::Recipient(subscription.chain_id),
                             authenticated: false,
-                            is_skippable: false,
+                            is_protected: true,
                             message: SystemMessage::Unsubscribe {
                                 id: context.chain_id,
                                 subscription,
@@ -609,7 +609,7 @@ where
                     let message = RawOutgoingMessage {
                         destination: Destination::Recipient(account.chain_id),
                         authenticated: false,
-                        is_skippable: false,
+                        is_protected: true,
                         message: SystemMessage::Credit { amount, account },
                     };
                     result.messages.push(message);
@@ -633,7 +633,7 @@ where
                 let message = RawOutgoingMessage {
                     destination: Destination::Recipient(target),
                     authenticated: true,
-                    is_skippable: false,
+                    is_protected: false, // because it can fail
                     message: SystemMessage::Withdraw {
                         amount,
                         account: Account {
@@ -662,7 +662,7 @@ where
                         let message = RawOutgoingMessage {
                             destination: Destination::Subscribers(SystemChannel::Admin.name()),
                             authenticated: false,
-                            is_skippable: false,
+                            is_protected: true,
                             message: SystemMessage::SetCommittees {
                                 epoch,
                                 committees: self.committees.get().clone(),
@@ -678,7 +678,7 @@ where
                         let message = RawOutgoingMessage {
                             destination: Destination::Subscribers(SystemChannel::Admin.name()),
                             authenticated: false,
-                            is_skippable: false,
+                            is_protected: true,
                             message: SystemMessage::SetCommittees {
                                 epoch: self.epoch.get().expect("chain is active"),
                                 committees: self.committees.get().clone(),
@@ -711,7 +711,7 @@ where
                 let message = RawOutgoingMessage {
                     destination: Destination::Recipient(chain_id),
                     authenticated: false,
-                    is_skippable: false,
+                    is_protected: true,
                     message: SystemMessage::Subscribe {
                         id: context.chain_id,
                         subscription,
@@ -732,7 +732,7 @@ where
                 let message = RawOutgoingMessage {
                     destination: Destination::Recipient(chain_id),
                     authenticated: false,
-                    is_skippable: false,
+                    is_protected: true,
                     message: SystemMessage::Unsubscribe {
                         id: context.chain_id,
                         subscription,
@@ -746,7 +746,7 @@ where
                 let message = RawOutgoingMessage {
                     destination: Destination::Recipient(context.chain_id),
                     authenticated: false,
-                    is_skippable: false,
+                    is_protected: true,
                     message: SystemMessage::BytecodePublished {
                         operation_index: context.index,
                     },
@@ -774,7 +774,7 @@ where
                 let message = RawOutgoingMessage {
                     destination: Destination::Recipient(context.chain_id),
                     authenticated: false,
-                    is_skippable: false,
+                    is_protected: true,
                     message: SystemMessage::ApplicationCreated,
                 };
                 result.messages.push(message);
@@ -787,7 +787,7 @@ where
                 let message = RawOutgoingMessage {
                     destination: Destination::Recipient(chain_id),
                     authenticated: false,
-                    is_skippable: false,
+                    is_protected: false, // because it can fail
                     message: SystemMessage::RequestApplication(application_id),
                 };
                 result.messages.push(message);
@@ -798,14 +798,6 @@ where
     }
 
     /// Executes a cross-chain message that represents the recipient's side of an operation.
-    ///
-    /// * Messages should not return an error unless it is a temporary failure (e.g.
-    /// storage) or a global system failure. An error will fail the entire cross-chain
-    /// request, allowing it to be retried later.
-    ///
-    /// * If execution is impossible for a deterministic reason (e.g. insufficient
-    /// funds), messages should fail silently and be skipped (similar to a transaction in
-    /// traditional blockchains).
     pub async fn execute_message(
         &mut self,
         context: MessageContext,
@@ -814,7 +806,11 @@ where
         let mut result = RawExecutionResult::default();
         use SystemMessage::*;
         match message {
-            Credit { amount, account } if context.chain_id == account.chain_id => {
+            Credit { amount, account } => {
+                ensure!(
+                    account.chain_id == context.chain_id,
+                    SystemExecutionError::IncorrectChainId(account.chain_id)
+                );
                 match &account.owner {
                     None => {
                         let new_balance = self.balance.get().saturating_add(amount);
@@ -828,29 +824,36 @@ where
             }
             Withdraw {
                 amount,
-                account:
-                    Account {
-                        owner: Some(owner),
-                        chain_id,
-                    },
+                account: Account { owner, chain_id },
                 user_data: _,
                 recipient,
-            } if chain_id == context.chain_id
-                && context.authenticated_signer.as_ref() == Some(&owner) =>
-            {
-                let balance = self.balances.get_mut_or_default(&owner).await?;
-                if balance.try_sub_assign(amount).is_ok() {
-                    if let Recipient::Account(account) = recipient {
+            } => {
+                ensure!(
+                    chain_id == context.chain_id,
+                    SystemExecutionError::IncorrectChainId(chain_id)
+                );
+                ensure!(
+                    owner.is_some(),
+                    SystemExecutionError::UnauthenticatedClaimOwner
+                );
+                ensure!(
+                    context.authenticated_signer == owner,
+                    SystemExecutionError::UnauthenticatedClaimOwner
+                );
+
+                let balance = self.balances.get_mut_or_default(&owner.unwrap()).await?;
+                balance.try_sub_assign(amount)?;
+                match recipient {
+                    Recipient::Account(account) => {
                         let message = RawOutgoingMessage {
                             destination: Destination::Recipient(account.chain_id),
                             authenticated: false,
-                            is_skippable: false,
+                            is_protected: true,
                             message: SystemMessage::Credit { amount, account },
                         };
                         result.messages.push(message);
                     }
-                } else {
-                    tracing::info!("Withdrawal request was skipped due to lack of funds.");
+                    Recipient::Burn => (),
                 }
             }
             SetCommittees { epoch, committees } => {
@@ -861,23 +864,31 @@ where
                 self.epoch.set(Some(epoch));
                 self.committees.set(committees);
             }
-            Subscribe { id, subscription } if subscription.chain_id == context.chain_id => {
+            Subscribe { id, subscription } => {
+                ensure!(
+                    subscription.chain_id == context.chain_id,
+                    SystemExecutionError::IncorrectChainId(subscription.chain_id)
+                );
                 // Notify the subscriber about this block, so that it is included in the
-                // receive_log of the subscriber and correctly synchronized.
+                // received_log of the subscriber and correctly synchronized.
                 let message = RawOutgoingMessage {
                     destination: Destination::Recipient(id),
                     authenticated: false,
-                    is_skippable: false,
+                    is_protected: true,
                     message: SystemMessage::Notify { id },
                 };
                 result.messages.push(message);
                 result.subscribe.push((subscription.name.clone(), id));
             }
-            Unsubscribe { id, subscription } if subscription.chain_id == context.chain_id => {
+            Unsubscribe { id, subscription } => {
+                ensure!(
+                    subscription.chain_id == context.chain_id,
+                    SystemExecutionError::IncorrectChainId(subscription.chain_id)
+                );
                 let message = RawOutgoingMessage {
                     destination: Destination::Recipient(id),
                     authenticated: false,
-                    is_skippable: false,
+                    is_protected: true,
                     message: SystemMessage::Notify { id },
                 };
                 result.messages.push(message);
@@ -895,7 +906,7 @@ where
                 let message = RawOutgoingMessage {
                     destination: Destination::Subscribers(SystemChannel::PublishedBytecodes.name()),
                     authenticated: false,
-                    is_skippable: false,
+                    is_protected: false,
                     message: SystemMessage::BytecodeLocations { locations },
                 };
                 result.messages.push(message);
@@ -905,10 +916,6 @@ where
                     self.registry.register_published_bytecode(id, location)?;
                 }
             }
-            ApplicationCreated | Notify { .. } => (),
-            OpenChain { .. } => {
-                // This special message is executed immediately when cross-chain requests are received.
-            }
             RegisterApplications { applications } => {
                 for application in applications {
                     self.registry
@@ -917,37 +924,25 @@ where
                 }
             }
             RequestApplication(application_id) => {
-                match self
+                let applications = self
                     .registry
                     .describe_applications_with_dependencies(
                         vec![application_id],
                         &Default::default(),
                     )
-                    .await
-                {
-                    Err(SystemExecutionError::UnknownApplicationId(id)) => {
-                        tracing::info!(
-                            %id,
-                            "Application request was skipped: application not known."
-                        );
-                    }
-                    Err(err) => return Err(err),
-                    Ok(applications) => {
-                        let message = RawOutgoingMessage {
-                            destination: Destination::Recipient(context.message_id.chain_id),
-                            authenticated: false,
-                            is_skippable: true,
-                            message: SystemMessage::RegisterApplications { applications },
-                        };
-                        result.messages.push(message);
-                    }
-                }
+                    .await?;
+                let message = RawOutgoingMessage {
+                    destination: Destination::Recipient(context.message_id.chain_id),
+                    authenticated: false,
+                    is_protected: false,
+                    message: SystemMessage::RegisterApplications { applications },
+                };
+                result.messages.push(message);
             }
-            _ => {
-                tracing::error!(
-                    "Skipping unexpected received message: {message:?} with context: {context:?}"
-                );
+            OpenChain { .. } => {
+                // This special message is executed immediately when cross-chain requests are received.
             }
+            ApplicationCreated | Notify { .. } => (),
         }
         Ok(result)
     }
@@ -1000,7 +995,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ExecutionStateView, TestExecutionRuntimeContext};
+    use crate::{ExecutionRuntimeConfig, ExecutionStateView, TestExecutionRuntimeContext};
     use linera_base::{
         crypto::{BcsSignable, KeyPair},
         data_types::BlockHeight,
@@ -1034,7 +1029,8 @@ mod tests {
             committees: BTreeMap::new(),
             ..SystemExecutionState::default()
         };
-        let view = ExecutionStateView::from_system_state(state).await;
+        let view =
+            ExecutionStateView::from_system_state(state, ExecutionRuntimeConfig::default()).await;
         (view, context)
     }
 

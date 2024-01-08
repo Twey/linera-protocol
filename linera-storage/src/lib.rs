@@ -44,8 +44,8 @@ use linera_chain::{
 };
 use linera_execution::{
     committee::{Committee, Epoch},
-    ChainOwnership, ExecutionError, ExecutionRuntimeContext, UserApplicationDescription,
-    UserApplicationId, UserContractCode, UserServiceCode, WasmRuntime,
+    ChainOwnership, ExecutionError, ExecutionRuntimeConfig, ExecutionRuntimeContext,
+    UserApplicationDescription, UserApplicationId, UserContractCode, UserServiceCode, WasmRuntime,
 };
 use linera_views::{
     common::Context,
@@ -56,7 +56,7 @@ use std::{fmt::Debug, sync::Arc};
 #[cfg(any(feature = "wasmer", feature = "wasmtime"))]
 use {
     linera_chain::data_types::CertificateValue,
-    linera_execution::{Operation, SystemOperation, WasmContract, WasmService},
+    linera_execution::{Operation, SystemOperation, WasmContractModule, WasmServiceModule},
 };
 
 /// Communicate with a persistent storage using the "views" abstraction.
@@ -208,7 +208,9 @@ pub trait Storage: Sized {
         else {
             unreachable!();
         };
-        Ok(Arc::new(WasmContract::new(contract, wasm_runtime).await?))
+        Ok(Arc::new(
+            WasmContractModule::new(contract, wasm_runtime).await?,
+        ))
     }
 
     #[cfg(not(any(feature = "wasmer", feature = "wasmtime")))]
@@ -239,7 +241,9 @@ pub trait Storage: Sized {
         else {
             unreachable!();
         };
-        Ok(Arc::new(WasmService::new(service, wasm_runtime).await?))
+        Ok(Arc::new(
+            WasmServiceModule::new(service, wasm_runtime).await?,
+        ))
     }
 
     #[cfg(not(any(feature = "wasmer", feature = "wasmtime")))]
@@ -294,6 +298,7 @@ async fn read_publish_bytecode_operation(
 pub struct ChainRuntimeContext<S> {
     storage: S,
     chain_id: ChainId,
+    execution_runtime_config: ExecutionRuntimeConfig,
     user_contracts: Arc<DashMap<UserApplicationId, UserContractCode>>,
     user_services: Arc<DashMap<UserApplicationId, UserServiceCode>>,
     _chain_guard: Arc<ChainGuard>,
@@ -306,6 +311,10 @@ where
 {
     fn chain_id(&self) -> ChainId {
         self.chain_id
+    }
+
+    fn execution_runtime_config(&self) -> linera_execution::ExecutionRuntimeConfig {
+        self.execution_runtime_config
     }
 
     fn user_contracts(&self) -> &Arc<DashMap<UserApplicationId, UserContractCode>> {

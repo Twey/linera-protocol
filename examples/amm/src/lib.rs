@@ -1,3 +1,6 @@
+// Copyright (c) Zefchain Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 use std::convert::Infallible;
 
 use async_graphql::{scalar, Request, Response};
@@ -95,6 +98,10 @@ pub enum ApplicationCall {
 pub enum AmmError {
     #[error("Invalid pool balance")]
     InvalidPoolBalanceError,
+
+    /// Failed authentication
+    #[error("failed authentication")]
+    IncorrectAuthentication,
 
     #[error("Token not found in the pool")]
     TokenNotFoundInPoolError,

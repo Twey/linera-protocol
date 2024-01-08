@@ -4,19 +4,20 @@
 use crate::{chain_guards::ChainGuards, ChainRuntimeContext, Storage};
 use async_trait::async_trait;
 use dashmap::DashMap;
-use linera_base::{crypto::CryptoHash, data_types::Timestamp, identifiers::ChainId};
+use linera_base::{crypto::CryptoHash, data_types::Timestamp, identifiers::ChainId, sync::Lazy};
 use linera_chain::{
     data_types::{Certificate, CertificateValue, HashedValue, LiteCertificate},
     ChainStateView,
 };
-use linera_execution::{UserApplicationId, UserContractCode, UserServiceCode, WasmRuntime};
+use linera_execution::{
+    ExecutionRuntimeConfig, UserApplicationId, UserContractCode, UserServiceCode, WasmRuntime,
+};
 use linera_views::{
     batch::Batch,
     common::{ContextFromStore, KeyValueStore},
     value_splitting::DatabaseConsistencyError,
     views::{View, ViewError},
 };
-use once_cell::sync::Lazy;
 use prometheus::{register_int_counter_vec, IntCounterVec};
 use serde::{Deserialize, Serialize};
 use std::{fmt::Debug, sync::Arc};
@@ -107,6 +108,7 @@ impl<Client> DbStorageInner<Client> {
 pub struct DbStorage<Client, Clock> {
     pub(crate) client: Arc<DbStorageInner<Client>>,
     pub clock: Clock,
+    pub execution_runtime_config: ExecutionRuntimeConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -189,6 +191,7 @@ where
         let runtime_context = ChainRuntimeContext {
             storage: self.clone(),
             chain_id,
+            execution_runtime_config: self.execution_runtime_config,
             user_contracts: self.client.user_contracts.clone(),
             user_services: self.client.user_services.clone(),
             _chain_guard: Arc::new(guard),

@@ -2,18 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    policy::ResourceControlPolicy,
-    resources::{ResourceTracker, RuntimeLimits},
-    runtime::{ApplicationStatus, ExecutionRuntime, SessionManager},
-    system::SystemExecutionStateView,
-    ExecutionError, ExecutionResult, ExecutionRuntimeContext, Message, MessageContext, Operation,
-    OperationContext, Query, QueryContext, RawExecutionResult, RawOutgoingMessage, Response,
+    policy::ResourceControlPolicy, resources::ResourceTracker, system::SystemExecutionStateView,
+    ContractSyncRuntime, ExecutionError, ExecutionResult, ExecutionRuntimeConfig,
+    ExecutionRuntimeContext, Message, MessageContext, Operation, OperationContext, Query,
+    QueryContext, RawExecutionResult, RawOutgoingMessage, Response, ServiceSyncRuntime,
     SystemMessage, UserApplicationDescription, UserApplicationId,
 };
-use linera_base::{
-    ensure,
-    identifiers::{ChainId, Owner},
-};
+use futures::StreamExt;
+use linera_base::identifiers::{ChainId, Owner};
 use linera_views::{
     common::Context,
     key_value_store_view::KeyValueStoreView,
@@ -52,7 +48,10 @@ where
 {
     /// Creates an in-memory view where the system state is set. This is used notably to
     /// generate state hashes in tests.
-    pub async fn from_system_state(state: SystemExecutionState) -> Self {
+    pub async fn from_system_state(
+        state: SystemExecutionState,
+        execution_runtime_config: ExecutionRuntimeConfig,
+    ) -> Self {
         // Destructure, to make sure we don't miss any fields.
         let SystemExecutionState {
             description,
@@ -69,6 +68,7 @@ where
         let guard = Arc::new(Mutex::new(BTreeMap::new())).lock_arc().await;
         let extra = TestExecutionRuntimeContext::new(
             description.expect("Chain description should be set").into(),
+            execution_runtime_config,
         );
         let context = MemoryContext::new(guard, TEST_MEMORY_MAX_STREAM_QUERIES, extra);
         let mut view = Self::load(context)
@@ -139,14 +139,14 @@ where
     }
 }
 
-enum UserAction {
+pub enum UserAction {
     Initialize(OperationContext, Vec<u8>),
     Operation(OperationContext, Vec<u8>),
     Message(MessageContext, Vec<u8>),
 }
 
 impl UserAction {
-    fn signer(&self) -> Option<Owner> {
+    pub(crate) fn signer(&self) -> Option<Owner> {
         use UserAction::*;
         match self {
             Initialize(context, _) => context.authenticated_signer,
@@ -170,112 +170,84 @@ where
         policy: &ResourceControlPolicy,
         tracker: &mut ResourceTracker,
     ) -> Result<Vec<ExecutionResult>, ExecutionError> {
+        let execution_results = match self.context().extra().execution_runtime_config() {
+            ExecutionRuntimeConfig::Synchronous => {
+                self.run_user_action_with_synchronous_runtime(
+                    application_id,
+                    chain_id,
+                    action,
+                    policy,
+                    tracker,
+                )
+                .await?
+            }
+        };
+        self.update_execution_results_with_app_registrations(execution_results)
+            .await
+    }
+
+    async fn run_user_action_with_synchronous_runtime(
+        &mut self,
+        application_id: UserApplicationId,
+        chain_id: ChainId,
+        action: UserAction,
+        policy: &ResourceControlPolicy,
+        tracker: &mut ResourceTracker,
+    ) -> Result<Vec<ExecutionResult>, ExecutionError> {
         let balance = self.system.balance.get();
         let runtime_limits = tracker.limits(policy, balance);
         let initial_remaining_fuel = policy.remaining_fuel(*balance);
-        // Try to load the contract. This may fail if the corresponding
-        // bytecode-publishing certificate doesn't exist yet on this validator.
-        let description = self
-            .system
-            .registry
-            .describe_application(application_id)
-            .await?;
-        let contract = self
-            .context()
-            .extra()
-            .get_user_contract(&description)
-            .await?;
-        let signer = action.signer();
-        // Create the execution runtime for this transaction.
-        let mut session_manager = SessionManager::default();
-        let mut results = Vec::new();
-        let mut applications = vec![ApplicationStatus {
-            id: application_id,
-            parameters: description.parameters,
-            signer,
-        }];
-        let runtime = ExecutionRuntime::new(
-            chain_id,
-            &mut applications,
-            self,
-            &mut session_manager,
-            &mut results,
-            initial_remaining_fuel,
-            runtime_limits,
-        );
-        // Make the call to user code.
-        let (runtime_actor, runtime_sender) = runtime.contract_runtime_actor();
-        let call_result_future = tokio::task::spawn_blocking(move || match action {
-            UserAction::Initialize(context, argument) => {
-                contract.initialize(context, runtime_sender, argument)
-            }
-            UserAction::Operation(context, operation) => {
-                contract.execute_operation(context, runtime_sender, operation)
-            }
-            UserAction::Message(context, message) => {
-                contract.execute_message(context, runtime_sender, message)
-            }
+        let (execution_state_sender, mut execution_state_receiver) =
+            futures::channel::mpsc::unbounded();
+        let execution_results_future = tokio::task::spawn_blocking(move || {
+            ContractSyncRuntime::run_action(
+                execution_state_sender,
+                application_id,
+                chain_id,
+                runtime_limits,
+                initial_remaining_fuel,
+                action,
+            )
         });
-        let runtime_result = runtime_actor.run().await;
-        let call_result = call_result_future.await?;
-
-        // TODO(#989): Make user errors fail blocks again.
-        let mut result = match (runtime_result, call_result) {
-            (Err(ExecutionError::UserError(message)), call_result) => {
-                assert!(matches!(
-                    call_result,
-                    Err(ExecutionError::MissingRuntimeResponse)
-                ));
-                tracing::error!("Ignoring error reported by user application: {message}");
-                RawExecutionResult::default()
-            }
-            (runtime_result, Err(ExecutionError::UserError(message))) => {
-                runtime_result?;
-                tracing::error!("Ignoring error reported by user application: {message}");
-                RawExecutionResult::default()
-            }
-            (runtime_result, call_result) => {
-                runtime_result?;
-                call_result?
-            }
-        };
-        // Set the authenticated signer to be used in outgoing messages.
-        result.authenticated_signer = signer;
-        let runtime_counts = runtime.runtime_counts();
+        while let Some(request) = execution_state_receiver.next().await {
+            self.handle_request(request).await?;
+        }
+        let (execution_results, runtime_counts) = execution_results_future.await??;
         let balance = self.system.balance.get_mut();
         tracker.update_limits(balance, policy, runtime_counts)?;
+        Ok(execution_results)
+    }
 
-        // Check that applications were correctly stacked and unstacked.
-        assert_eq!(applications.len(), 1);
-        assert_eq!(applications[0].id, application_id);
-        // Make sure to declare the application first for all recipients of the user
-        // execution result.
+    async fn update_execution_results_with_app_registrations(
+        &self,
+        mut results: Vec<ExecutionResult>,
+    ) -> Result<Vec<ExecutionResult>, ExecutionError> {
+        // TODO(#1417): It looks like we are forgetting about the recipients of messages
+        // sent by earlier entries in `results` (i.e. application calls).
+        let Some(ExecutionResult::User(application_id, result)) = results.last() else {
+            return Ok(results);
+        };
+        // Make sure to declare applications before recipients execute messages produced
+        // by the user execution results.
         let mut system_result = RawExecutionResult::default();
         let applications = self
             .system
             .registry
-            .describe_applications_with_dependencies(vec![application_id], &Default::default())
+            .describe_applications_with_dependencies(vec![*application_id], &Default::default())
             .await?;
         for message in &result.messages {
             system_result.messages.push(RawOutgoingMessage {
                 destination: message.destination.clone(),
                 authenticated: false,
-                is_skippable: true,
+                is_protected: false,
                 message: SystemMessage::RegisterApplications {
                     applications: applications.clone(),
                 },
             });
         }
         if !system_result.messages.is_empty() {
-            results.push(ExecutionResult::System(system_result));
+            results.insert(0, ExecutionResult::System(system_result));
         }
-        // Update externally-visible results.
-        results.push(ExecutionResult::User(application_id, result));
-        // Check that all sessions were properly closed.
-        ensure!(
-            session_manager.states.is_empty(),
-            ExecutionError::SessionWasNotClosed
-        );
         Ok(results)
     }
 
@@ -368,50 +340,32 @@ where
                 application_id,
                 bytes,
             } => {
-                // Load the service.
-                let description = self
-                    .system
-                    .registry
-                    .describe_application(application_id)
-                    .await?;
-                let service = self
-                    .context()
-                    .extra()
-                    .get_user_service(&description)
-                    .await?;
-                // Create the execution runtime for this transaction.
-                let mut session_manager = SessionManager::default();
-                let mut results = Vec::new();
-                let mut applications = vec![ApplicationStatus {
-                    id: application_id,
-                    parameters: description.parameters,
-                    signer: None,
-                }];
-                let runtime_limits = RuntimeLimits::default();
-                let remaining_fuel = 0;
-                let runtime = ExecutionRuntime::new(
-                    context.chain_id,
-                    &mut applications,
-                    self,
-                    &mut session_manager,
-                    &mut results,
-                    remaining_fuel,
-                    runtime_limits,
-                );
-                let (runtime_actor, runtime_sender) = runtime.service_runtime_actor();
-                // Run the query.
-                let response_future = tokio::task::spawn_blocking(move || {
-                    service.handle_query(context, runtime_sender, bytes)
-                });
-                runtime_actor.run().await?;
-                let response = response_future.await??;
-
-                // Check that applications were correctly stacked and unstacked.
-                assert_eq!(applications.len(), 1);
-                assert_eq!(applications[0].id, application_id);
+                let response = match self.context().extra().execution_runtime_config() {
+                    ExecutionRuntimeConfig::Synchronous => {
+                        self.query_application_with_sync_runtime(application_id, context, bytes)
+                            .await?
+                    }
+                };
                 Ok(Response::User(response))
             }
         }
+    }
+
+    async fn query_application_with_sync_runtime(
+        &mut self,
+        application_id: UserApplicationId,
+        context: QueryContext,
+        query: Vec<u8>,
+    ) -> Result<Vec<u8>, ExecutionError> {
+        let (execution_state_sender, mut execution_state_receiver) =
+            futures::channel::mpsc::unbounded();
+        let query_result_future = tokio::task::spawn_blocking(move || {
+            ServiceSyncRuntime::run_query(execution_state_sender, application_id, context, query)
+        });
+        while let Some(request) = execution_state_receiver.next().await {
+            self.handle_request(request).await?;
+        }
+        query_result_future.await?
     }
 
     pub async fn list_applications(

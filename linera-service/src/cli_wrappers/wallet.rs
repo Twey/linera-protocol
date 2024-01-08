@@ -16,7 +16,7 @@ use linera_base::{
     data_types::Amount,
     identifiers::{ApplicationId, BytecodeId, ChainId, MessageId, Owner},
 };
-use linera_execution::{committee::ValidatorName, Bytecode};
+use linera_execution::{committee::ValidatorName, system::SystemChannel, Bytecode};
 use serde::{de::DeserializeOwned, ser::Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -145,11 +145,11 @@ impl ClientWrapper {
     }
 
     /// Runs `linera create-genesis-config`.
-    pub async fn create_genesis_config(&self) -> Result<()> {
+    pub async fn create_genesis_config(&self, initial_funding: Amount) -> Result<()> {
         let mut command = self.command().await?;
         command
             .args(["create-genesis-config", "10"])
-            .args(["--initial-funding", "10"])
+            .args(["--initial-funding", &initial_funding.to_string()])
             .args(["--committee", "committee.json"])
             .args(["--genesis", "genesis.json"]);
         if let Some(seed) = self.testing_prng_seed {
@@ -251,20 +251,49 @@ impl ClientWrapper {
     pub async fn create_application<A: ContractAbi>(
         &self,
         bytecode_id: &BytecodeId,
+        parameters: &A::Parameters,
         argument: &A::InitializationArgument,
+        required_application_ids: &[ApplicationId],
         creator: impl Into<Option<ChainId>>,
     ) -> Result<ApplicationId<A>> {
+        let json_parameters = serde_json::to_string(parameters)?;
         let json_argument = serde_json::to_string(argument)?;
-        let stdout = self
-            .command()
-            .await?
+        let mut command = self.command().await?;
+        command
             .arg("create-application")
             .arg(bytecode_id.to_string())
+            .args(["--json-parameters", &json_parameters])
             .args(["--json-argument", &json_argument])
-            .args(creator.into().iter().map(ChainId::to_string))
-            .spawn_and_wait_for_stdout()
-            .await?;
+            .args(creator.into().iter().map(ChainId::to_string));
+        if !required_application_ids.is_empty() {
+            command.arg("--required-application-ids");
+            command.args(
+                required_application_ids
+                    .iter()
+                    .map(ApplicationId::to_string),
+            );
+        }
+        let stdout = command.spawn_and_wait_for_stdout().await?;
         Ok(stdout.trim().parse::<ApplicationId>()?.with_abi())
+    }
+
+    /// Runs `linera request-application`
+    pub async fn request_application(
+        &self,
+        application_id: ApplicationId,
+        requester_chain_id: ChainId,
+        target_chain_id: Option<ChainId>,
+    ) -> Result<BytecodeId> {
+        let mut command = self.command().await?;
+        command
+            .arg("request-application")
+            .arg(application_id.to_string())
+            .args(["--requester-chain-id", &requester_chain_id.to_string()]);
+        if let Some(target_chain_id) = target_chain_id {
+            command.args(["--target-chain-id", &target_chain_id.to_string()]);
+        }
+        let stdout = command.spawn_and_wait_for_stdout().await?;
+        Ok(stdout.trim().parse()?)
     }
 
     /// Runs `linera service`.
@@ -384,11 +413,13 @@ impl ClientWrapper {
         &self,
         from: ChainId,
         to_public_key: Option<PublicKey>,
+        initial_balance: Amount,
     ) -> Result<(MessageId, ChainId)> {
         let mut command = self.command().await?;
         command
             .arg("open-chain")
-            .args(["--from", &from.to_string()]);
+            .args(["--from", &from.to_string()])
+            .args(["--initial-balance", &initial_balance.to_string()]);
 
         if let Some(public_key) = to_public_key {
             command.args(["--to-public-key", &public_key.to_string()]);
@@ -403,13 +434,19 @@ impl ClientWrapper {
     }
 
     /// Runs `linera open-chain` then `linera assign`.
-    pub async fn open_and_assign(&self, client: &ClientWrapper) -> Result<ChainId> {
+    pub async fn open_and_assign(
+        &self,
+        client: &ClientWrapper,
+        initial_balance: Amount,
+    ) -> Result<ChainId> {
         let our_chain = self
             .get_wallet()?
             .default_chain()
             .context("no default chain found")?;
         let key = client.keygen().await?;
-        let (message_id, new_chain) = self.open_chain(our_chain, Some(key)).await?;
+        let (message_id, new_chain) = self
+            .open_chain(our_chain, Some(key), initial_balance)
+            .await?;
         assert_eq!(new_chain, client.assign(key, message_id).await?);
         Ok(new_chain)
     }
@@ -552,10 +589,7 @@ impl ClientWrapper {
             .context("error while parsing the result of `linera sync-balance`")?;
         Ok(amount)
     }
-}
 
-#[cfg(any(test, feature = "test"))]
-impl ClientWrapper {
     pub async fn build_application(
         &self,
         path: &Path,
@@ -582,7 +616,10 @@ impl ClientWrapper {
 
         Ok((contract, service))
     }
+}
 
+#[cfg(any(test, feature = "test"))]
+impl ClientWrapper {
     pub async fn build_example(&self, name: &str) -> Result<(PathBuf, PathBuf)> {
         self.build_application(Self::example_path(name)?.as_path(), name, true)
             .await
@@ -780,6 +817,24 @@ impl NodeService {
         let data = self.query_node(query).await?;
         serde_json::from_value(data["requestApplication"].clone())
             .context("missing requestApplication field in response")
+    }
+
+    pub async fn subscribe(
+        &self,
+        subscriber_chain_id: ChainId,
+        publisher_chain_id: ChainId,
+        channel: SystemChannel,
+    ) -> Result<()> {
+        let query = format!(
+            "mutation {{ subscribe(\
+                 subscriberChainId: \"{subscriber_chain_id}\", \
+                 publisherChainId: \"{publisher_chain_id}\", \
+                 channel: \"{}\") \
+             }}",
+            channel.to_value(),
+        );
+        self.query_node(query).await?;
+        Ok(())
     }
 }
 
