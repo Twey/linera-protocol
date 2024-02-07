@@ -16,8 +16,9 @@
     ];
     perSystem = { config, self', pkgs, lib, system, rust-overlay, ... }:
       let
-        cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
         nonRustDeps = with pkgs; [
+          chromedriver
+          chromium
           clang
           kubernetes-helm
           kind
@@ -29,6 +30,7 @@
           protobuf
           pkg-config
           rocksdb
+          wasm-pack
         ];
         rustBuildToolchain = (pkgs.rust-bin.fromRustupToolchainFile
           ./toolchains/build/rust-toolchain.toml);
