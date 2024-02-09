@@ -166,11 +166,11 @@ jobs:
         cargo check-all-features --all-targets
     - name: Check if Cargo.toml files are sorted
       run: |
-        cargo sort -c -w
+        cargo sort --check --check-format --workspace --grouped
     - name: Check if Cargo.toml files are sorted
       run: |
         cd examples
-        cargo sort -c -w
+        cargo sort --check --check-format --workspace --grouped
     - name: Restore `rust-toolchain.toml` file
       if: '!cancelled()'
       run: |
