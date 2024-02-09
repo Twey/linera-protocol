@@ -1,6 +1,9 @@
 // Copyright (c) Zefchain Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(web)]
+compile_error!("RocksDB support is not available for WebAssembly");
+
 use crate::{
     batch::{Batch, WriteOperation},
     common::{
@@ -20,7 +23,7 @@ use std::{
 };
 use thiserror::Error;
 
-#[cfg(feature = "metrics")]
+#[cfg(with_metrics)]
 use crate::metering::{
     MeteredStore, LRU_CACHING_METRICS, ROCKS_DB_METRICS, VALUE_SPLITTING_METRICS,
 };
@@ -237,11 +240,11 @@ impl KeyValueStore for RocksDbStoreInternal {
 /// A shared DB client for RocksDB implementing LruCaching
 #[derive(Clone)]
 pub struct RocksDbStore {
-    #[cfg(feature = "metrics")]
+    #[cfg(with_metrics)]
     store: MeteredStore<
         LruCachingStore<MeteredStore<ValueSplittingStore<MeteredStore<RocksDbStoreInternal>>>>,
     >,
-    #[cfg(not(feature = "metrics"))]
+    #[cfg(not(with_metrics))]
     store: LruCachingStore<ValueSplittingStore<RocksDbStoreInternal>>,
 }
 
@@ -306,14 +309,14 @@ impl RocksDbStore {
         Ok(client)
     }
 
-    #[cfg(not(feature = "metrics"))]
+    #[cfg(not(with_metrics))]
     fn get_complete_store(store: RocksDbStoreInternal, cache_size: usize) -> Self {
         let store = ValueSplittingStore::new(store);
         let store = LruCachingStore::new(store, cache_size);
         Self { store }
     }
 
-    #[cfg(feature = "metrics")]
+    #[cfg(with_metrics)]
     fn get_complete_store(store: RocksDbStoreInternal, cache_size: usize) -> Self {
         let store = MeteredStore::new(&ROCKS_DB_METRICS, store);
         let store = ValueSplittingStore::new(store);

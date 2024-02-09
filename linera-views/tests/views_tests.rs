@@ -33,23 +33,23 @@ use std::{
     sync::Arc,
 };
 
-#[cfg(feature = "rocksdb")]
+#[cfg(with_rocksdb)]
 use {
     linera_views::rocks_db::{create_rocks_db_test_store, RocksDbContext, RocksDbStore},
     tempfile::TempDir,
 };
 
-#[cfg(feature = "aws")]
+#[cfg(with_dynamodb)]
 use linera_views::{
     common::CommonStoreConfig, dynamo_db::create_dynamo_db_common_config,
     dynamo_db::DynamoDbContext, dynamo_db::DynamoDbStoreConfig, dynamo_db::LocalStackTestContext,
     dynamo_db::TableName, test_utils::get_table_name,
 };
 
-#[cfg(feature = "scylladb")]
+#[cfg(with_scylladb)]
 use linera_views::scylla_db::{create_scylla_db_test_store, ScyllaDbContext, ScyllaDbStore};
 
-#[cfg(any(feature = "aws", feature = "rocksdb", feature = "scylladb"))]
+#[cfg(any(with_dynamodb, with_rocksdb, with_scylladb))]
 use std::collections::BTreeSet;
 
 #[allow(clippy::type_complexity)]
@@ -161,14 +161,14 @@ impl StateStore for LruMemoryStore {
     }
 }
 
-#[cfg(feature = "rocksdb")]
+#[cfg(with_rocksdb)]
 pub struct RocksDbTestStore {
     store: RocksDbStore,
     accessed_chains: BTreeSet<usize>,
     _dir: TempDir,
 }
 
-#[cfg(feature = "rocksdb")]
+#[cfg(with_rocksdb)]
 #[async_trait]
 impl StateStore for RocksDbTestStore {
     type Context = RocksDbContext<usize>;
@@ -193,13 +193,13 @@ impl StateStore for RocksDbTestStore {
     }
 }
 
-#[cfg(feature = "scylladb")]
+#[cfg(with_scylladb)]
 pub struct ScyllaDbTestStore {
     store: ScyllaDbStore,
     accessed_chains: BTreeSet<usize>,
 }
 
-#[cfg(feature = "scylladb")]
+#[cfg(with_scylladb)]
 #[async_trait]
 impl StateStore for ScyllaDbTestStore {
     type Context = ScyllaDbContext<usize>;
@@ -223,7 +223,7 @@ impl StateStore for ScyllaDbTestStore {
     }
 }
 
-#[cfg(feature = "aws")]
+#[cfg(with_dynamodb)]
 pub struct DynamoDbTestStore {
     localstack: LocalStackTestContext,
     table_name: TableName,
@@ -232,7 +232,7 @@ pub struct DynamoDbTestStore {
     accessed_chains: BTreeSet<usize>,
 }
 
-#[cfg(feature = "aws")]
+#[cfg(with_dynamodb)]
 #[async_trait]
 impl StateStore for DynamoDbTestStore {
     type Context = DynamoDbContext<usize>;
@@ -731,7 +731,7 @@ async fn test_views_in_key_value_store_view_memory() {
     }
 }
 
-#[cfg(feature = "rocksdb")]
+#[cfg(with_rocksdb)]
 #[cfg(test)]
 async fn test_views_in_rocks_db_param(config: &TestConfig) {
     tracing::warn!("Testing config {:?} with rocks_db", config);
@@ -745,7 +745,7 @@ async fn test_views_in_rocks_db_param(config: &TestConfig) {
     assert_eq!(hash, hash2);
 }
 
-#[cfg(feature = "rocksdb")]
+#[cfg(with_rocksdb)]
 #[tokio::test]
 async fn test_views_in_rocks_db() {
     for config in TestConfig::samples() {
@@ -753,7 +753,7 @@ async fn test_views_in_rocks_db() {
     }
 }
 
-#[cfg(feature = "scylladb")]
+#[cfg(with_scylladb)]
 #[cfg(test)]
 async fn test_views_in_scylla_db_param(config: &TestConfig) {
     tracing::warn!("Testing config {:?} with scylla_db", config);
@@ -767,7 +767,7 @@ async fn test_views_in_scylla_db_param(config: &TestConfig) {
     assert_eq!(hash, hash2);
 }
 
-#[cfg(feature = "scylladb")]
+#[cfg(with_scylladb)]
 #[tokio::test]
 async fn test_views_in_scylla_db() {
     for config in TestConfig::samples() {
@@ -775,7 +775,7 @@ async fn test_views_in_scylla_db() {
     }
 }
 
-#[cfg(feature = "aws")]
+#[cfg(with_dynamodb)]
 #[tokio::test]
 async fn test_views_in_dynamo_db() {
     let mut store = DynamoDbTestStore::new().await;
@@ -788,7 +788,7 @@ async fn test_views_in_dynamo_db() {
     assert_eq!(hash, hash2);
 }
 
-#[cfg(feature = "rocksdb")]
+#[cfg(with_rocksdb)]
 #[cfg(test)]
 async fn test_store_rollback_kernel<S>(store: &mut S)
 where
@@ -831,7 +831,7 @@ where
     };
 }
 
-#[cfg(feature = "rocksdb")]
+#[cfg(with_rocksdb)]
 #[tokio::test]
 async fn test_store_rollback() {
     let mut store = MemoryTestStore::new().await;
@@ -1202,7 +1202,7 @@ where
 }
 
 #[tokio::test]
-#[cfg(feature = "aws")]
+#[cfg(with_dynamodb)]
 async fn check_large_write_dynamo_db() {
     // By writing 1000 elements we seriously check the Amazon journaling
     // writing system.

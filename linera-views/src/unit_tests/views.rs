@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use std::{collections::VecDeque, marker::PhantomData};
 use test_case::test_case;
 
-#[cfg(feature = "rocksdb")]
+#[cfg(with_rocksdb)]
 use {
     crate::rocks_db::create_rocks_db_common_config,
     crate::rocks_db::RocksDbStoreConfig,
@@ -23,7 +23,7 @@ use {
     tempfile::TempDir,
 };
 
-#[cfg(feature = "aws")]
+#[cfg(with_dynamodb)]
 use crate::{
     dynamo_db::DynamoDbStoreConfig,
     dynamo_db::LocalStackTestContext,
@@ -31,7 +31,7 @@ use crate::{
     test_utils::get_table_name,
 };
 
-#[cfg(feature = "scylladb")]
+#[cfg(with_scylladb)]
 use crate::{scylla_db::create_scylla_db_test_store, scylla_db::ScyllaDbContext};
 
 #[tokio::test]
@@ -39,19 +39,19 @@ async fn test_queue_operations_with_memory_context() -> Result<(), anyhow::Error
     run_test_queue_operations_test_cases(MemoryContextFactory).await
 }
 
-#[cfg(feature = "rocksdb")]
+#[cfg(with_rocksdb)]
 #[tokio::test]
 async fn test_queue_operations_with_rocks_db_context() -> Result<(), anyhow::Error> {
     run_test_queue_operations_test_cases(RocksDbContextFactory::default()).await
 }
 
-#[cfg(feature = "aws")]
+#[cfg(with_dynamodb)]
 #[tokio::test]
 async fn test_queue_operations_with_dynamo_db_context() -> Result<(), anyhow::Error> {
     run_test_queue_operations_test_cases(DynamoDbContextFactory::default()).await
 }
 
-#[cfg(feature = "scylladb")]
+#[cfg(with_scylladb)]
 #[tokio::test]
 async fn test_queue_operations_with_scylla_db_context() -> Result<(), anyhow::Error> {
     run_test_queue_operations_test_cases(ScyllaDbContextFactory::default()).await
@@ -212,13 +212,13 @@ impl TestContextFactory for MemoryContextFactory {
     }
 }
 
-#[cfg(feature = "rocksdb")]
+#[cfg(with_rocksdb)]
 #[derive(Default)]
 struct RocksDbContextFactory {
     temporary_directories: Vec<TempDir>,
 }
 
-#[cfg(feature = "rocksdb")]
+#[cfg(with_rocksdb)]
 #[async_trait]
 impl TestContextFactory for RocksDbContextFactory {
     type Context = RocksDbContext<()>;
@@ -242,14 +242,14 @@ impl TestContextFactory for RocksDbContextFactory {
     }
 }
 
-#[cfg(feature = "aws")]
+#[cfg(with_dynamodb)]
 #[derive(Default)]
 struct DynamoDbContextFactory {
     localstack: Option<LocalStackTestContext>,
     table_counter: usize,
 }
 
-#[cfg(feature = "aws")]
+#[cfg(with_dynamodb)]
 #[async_trait]
 impl TestContextFactory for DynamoDbContextFactory {
     type Context = DynamoDbContext<()>;
@@ -278,13 +278,13 @@ impl TestContextFactory for DynamoDbContextFactory {
     }
 }
 
-#[cfg(feature = "scylladb")]
+#[cfg(with_scylladb)]
 #[derive(Default)]
 struct ScyllaDbContextFactory {
     table_names: Vec<String>,
 }
 
-#[cfg(feature = "scylladb")]
+#[cfg(with_scylladb)]
 #[async_trait]
 impl TestContextFactory for ScyllaDbContextFactory {
     type Context = ScyllaDbContext<()>;

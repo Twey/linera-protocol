@@ -1,6 +1,9 @@
 // Copyright (c) Zefchain Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(web)]
+compile_error!("DynamoDB support is not available for WebAssembly");
+
 use crate::{
     batch::{Batch, SimpleUnorderedBatch},
     common::{
@@ -40,7 +43,7 @@ use linera_base::ensure;
 use std::{collections::HashMap, env, str::FromStr, sync::Arc};
 use thiserror::Error;
 
-#[cfg(feature = "metrics")]
+#[cfg(with_metrics)]
 use crate::metering::{
     MeteredStore, DYNAMO_DB_METRICS, LRU_CACHING_METRICS, VALUE_SPLITTING_METRICS,
 };
@@ -952,7 +955,7 @@ impl DirectKeyValueStore for DynamoDbStoreInternal {
 #[derive(Clone)]
 #[allow(clippy::type_complexity)]
 pub struct DynamoDbStore {
-    #[cfg(feature = "metrics")]
+    #[cfg(with_metrics)]
     store: MeteredStore<
         LruCachingStore<
             MeteredStore<
@@ -960,7 +963,7 @@ pub struct DynamoDbStore {
             >,
         >,
     >,
-    #[cfg(not(feature = "metrics"))]
+    #[cfg(not(with_metrics))]
     store: LruCachingStore<ValueSplittingStore<JournalingKeyValueStore<DynamoDbStoreInternal>>>,
 }
 
@@ -1023,7 +1026,7 @@ impl KeyValueStore for DynamoDbStore {
 }
 
 impl DynamoDbStore {
-    #[cfg(not(feature = "metrics"))]
+    #[cfg(not(with_metrics))]
     fn get_complete_store(
         store: JournalingKeyValueStore<DynamoDbStoreInternal>,
         cache_size: usize,
@@ -1033,7 +1036,7 @@ impl DynamoDbStore {
         Self { store }
     }
 
-    #[cfg(feature = "metrics")]
+    #[cfg(with_metrics)]
     fn get_complete_store(
         store: JournalingKeyValueStore<DynamoDbStoreInternal>,
         cache_size: usize,

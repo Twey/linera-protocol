@@ -15,7 +15,10 @@
 //! [trait1]: common::KeyValueStore
 //! [trait2]: common::Context
 
-#[cfg(feature = "metrics")]
+#[cfg(web)]
+compile_error!("ScyllaDB support is not available for WebAssembly");
+
+#[cfg(with_metrics)]
 use crate::metering::{MeteredStore, LRU_CACHING_METRICS, SCYLLA_DB_METRICS};
 
 #[cfg(any(test, feature = "test"))]
@@ -741,10 +744,10 @@ impl ScyllaDbStoreInternal {
 /// A shared DB store for ScyllaDB implementing LruCaching
 #[derive(Clone)]
 pub struct ScyllaDbStore {
-    #[cfg(feature = "metrics")]
+    #[cfg(with_metrics)]
     store:
         MeteredStore<LruCachingStore<MeteredStore<JournalingKeyValueStore<ScyllaDbStoreInternal>>>>,
-    #[cfg(not(feature = "metrics"))]
+    #[cfg(not(with_metrics))]
     store: LruCachingStore<JournalingKeyValueStore<ScyllaDbStoreInternal>>,
 }
 
@@ -821,18 +824,18 @@ impl KeyValueStore for ScyllaDbStore {
 
 impl ScyllaDbStore {
     /// Gets the table name of the ScyllaDB store.
-    #[cfg(not(feature = "metrics"))]
+    #[cfg(not(with_metrics))]
     pub async fn get_table_name(&self) -> String {
         self.store.store.store.get_table_name().await
     }
 
     /// Gets the table name of the ScyllaDB store.
-    #[cfg(feature = "metrics")]
+    #[cfg(with_metrics)]
     pub async fn get_table_name(&self) -> String {
         self.store.store.store.store.store.get_table_name().await
     }
 
-    #[cfg(not(feature = "metrics"))]
+    #[cfg(not(with_metrics))]
     fn get_complete_store(
         store: JournalingKeyValueStore<ScyllaDbStoreInternal>,
         cache_size: usize,
@@ -841,7 +844,7 @@ impl ScyllaDbStore {
         Self { store }
     }
 
-    #[cfg(feature = "metrics")]
+    #[cfg(with_metrics)]
     fn get_complete_store(
         store: JournalingKeyValueStore<ScyllaDbStoreInternal>,
         cache_size: usize,
