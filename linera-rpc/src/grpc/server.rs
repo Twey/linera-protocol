@@ -1,7 +1,7 @@
 // Copyright (c) Zefchain Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::pool::ConnectionPool;
+use super::pool::GrpcConnectionPool;
 
 use crate::{
     config::{CrossChainConfig, NotificationConfig, ShardId, ValidatorInternalNetworkConfig},
@@ -104,7 +104,7 @@ static SERVER_REQUEST_LATENCY_PER_REQUEST_TYPE: Lazy<HistogramVec> = Lazy::new(|
 });
 
 #[derive(Clone)]
-pub struct Server<S> {
+pub struct GrpcServer<S> {
     state: WorkerState<S>,
     shard_id: ShardId,
     network: ValidatorInternalNetworkConfig,
@@ -112,27 +112,27 @@ pub struct Server<S> {
     notification_sender: NotificationSender,
 }
 
-pub struct ServerHandle {
+pub struct GrpcServerHandle {
     _complete: Sender<()>,
     handle: JoinHandle<Result<(), tonic::transport::Error>>,
 }
 
-impl ServerHandle {
+impl GrpcServerHandle {
     pub async fn join(self) -> Result<(), Error> {
         Ok(self.handle.await??)
     }
 }
 
 #[derive(Clone)]
-pub struct PrometheusMetricsMiddlewareLayer;
+pub struct GrpcPrometheusMetricsMiddlewareLayer;
 
 #[derive(Clone)]
-pub struct PrometheusMetricsMiddlewareService<T> {
+pub struct GrpcPrometheusMetricsMiddlewareService<T> {
     service: T,
 }
 
-impl<S> Layer<S> for PrometheusMetricsMiddlewareLayer {
-    type Service = PrometheusMetricsMiddlewareService<S>;
+impl<S> Layer<S> for GrpcPrometheusMetricsMiddlewareLayer {
+    type Service = GrpcPrometheusMetricsMiddlewareService<S>;
 
     fn layer(&self, service: S) -> Self::Service {
         PrometheusMetricsMiddlewareService { service }
@@ -140,7 +140,7 @@ impl<S> Layer<S> for PrometheusMetricsMiddlewareLayer {
 }
 
 impl<S> Service<tonic::codegen::http::Request<tonic::transport::Body>>
-    for PrometheusMetricsMiddlewareService<S>
+    for GrpcPrometheusMetricsMiddlewareService<S>
 where
     S::Future: Send + 'static,
     S: Service<tonic::codegen::http::Request<tonic::transport::Body>> + std::marker::Send,
@@ -172,7 +172,7 @@ where
     }
 }
 
-impl<S> Server<S>
+impl<S> GrpcServer<S>
 where
     S: Storage + Clone + Send + Sync + 'static,
     ViewError: From<S::ContextError>,
@@ -342,7 +342,7 @@ where
         this_shard: ShardId,
         receiver: mpsc::Receiver<(linera_core::data_types::CrossChainRequest, ShardId)>,
     ) {
-        let pool = ConnectionPool::default();
+        let pool = GrpcConnectionPool::default();
         let max_concurrent_tasks = Some(cross_chain_max_concurrent_tasks);
 
         receiver
@@ -424,7 +424,7 @@ where
 }
 
 #[tonic::async_trait]
-impl<S> ValidatorWorkerRpc for Server<S>
+impl<S> ValidatorWorkerRpc for GrpcServer<S>
 where
     S: Storage + Clone + Send + Sync + 'static,
     ViewError: From<S::ContextError>,
@@ -601,35 +601,35 @@ where
 
 /// Types which are proxyable and expose the appropriate methods to be handled
 /// by the `GrpcProxy`
-pub trait Proxyable {
+pub trait GrpcProxyable {
     fn chain_id(&self) -> Option<ChainId>;
 }
 
-impl Proxyable for BlockProposal {
+impl GrpcProxyable for BlockProposal {
     fn chain_id(&self) -> Option<ChainId> {
         self.chain_id.clone()?.try_into().ok()
     }
 }
 
-impl Proxyable for LiteCertificate {
+impl GrpcProxyable for LiteCertificate {
     fn chain_id(&self) -> Option<ChainId> {
         self.chain_id.clone()?.try_into().ok()
     }
 }
 
-impl Proxyable for Certificate {
+impl GrpcProxyable for Certificate {
     fn chain_id(&self) -> Option<ChainId> {
         self.chain_id.clone()?.try_into().ok()
     }
 }
 
-impl Proxyable for ChainInfoQuery {
+impl GrpcProxyable for ChainInfoQuery {
     fn chain_id(&self) -> Option<ChainId> {
         self.chain_id.clone()?.try_into().ok()
     }
 }
 
-impl Proxyable for CrossChainRequest {
+impl GrpcProxyable for CrossChainRequest {
     fn chain_id(&self) -> Option<ChainId> {
         use super::api::cross_chain_request::Inner;
 

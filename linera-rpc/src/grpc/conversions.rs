@@ -22,7 +22,7 @@ use thiserror::Error;
 use tonic::{Code, Status};
 
 #[derive(Error, Debug)]
-pub enum ProtoConversionError {
+pub enum GrpcProtoConversionError {
     #[error(transparent)]
     BincodeError(#[from] bincode::Error),
     #[error("Conversion failed due to missing field")]
@@ -36,14 +36,14 @@ pub enum ProtoConversionError {
 }
 
 /// Extracts an optional field from a Proto type and tries to map it.
-fn try_proto_convert<S, T>(t: Option<T>) -> Result<S, ProtoConversionError>
+fn try_proto_convert<S, T>(t: Option<T>) -> Result<S, GrpcProtoConversionError>
 where
     T: TryInto<S, Error = ProtoConversionError>,
 {
     t.ok_or(ProtoConversionError::MissingField)?.try_into()
 }
 
-impl From<ProtoConversionError> for Status {
+impl From<GrpcProtoConversionError> for Status {
     fn from(error: ProtoConversionError) -> Self {
         Status::new(Code::InvalidArgument, error.to_string())
     }

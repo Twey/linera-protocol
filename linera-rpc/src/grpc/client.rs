@@ -5,7 +5,7 @@ use super::{
     api::{
         chain_info_result::Inner, validator_node_client::ValidatorNodeClient, SubscriptionRequest,
     },
-    Error, ProtoConversionError, MAX_MESSAGE_SIZE,
+    Error, GrpcProtoConversionError, MAX_MESSAGE_SIZE,
 };
 use crate::{
     config::ValidatorPublicNetworkConfig, mass_client, node_provider::NodeOptions,
@@ -29,14 +29,14 @@ use tonic::{Code, Request, Status};
 use tracing::{debug, info, instrument, warn};
 
 #[derive(Clone)]
-pub struct Client {
+pub struct GrpcClient {
     address: String,
     client: ValidatorNodeClient<tonic::transport::Channel>,
     notification_retry_delay: Duration,
     notification_retries: u32,
 }
 
-impl Client {
+impl GrpcClient {
     pub fn new(network: ValidatorPublicNetworkConfig, options: NodeOptions) -> Result<Self, Error> {
         let address = network.http_address();
         let channel = tonic::transport::Channel::from_shared(address.clone())?
@@ -124,7 +124,7 @@ macro_rules! client_delegate {
 }
 
 #[async_trait]
-impl ValidatorNode for Client {
+impl ValidatorNode for GrpcClient {
     #[instrument(target = "grpc_client", skip_all, err, fields(address = self.address))]
     async fn handle_block_proposal(
         &mut self,
@@ -248,7 +248,7 @@ impl ValidatorNode for Client {
 }
 
 #[async_trait]
-impl mass_client::MassClient for Client {
+impl mass_client::MassClient for GrpcClient {
     #[tracing::instrument(skip_all, err)]
     async fn send(
         &mut self,
@@ -274,7 +274,7 @@ impl mass_client::MassClient for Client {
                     match response
                         .into_inner()
                         .inner
-                        .ok_or(ProtoConversionError::MissingField)?
+                        .ok_or(GrpcProtoConversionError::MissingField)?
                     {
                         Inner::ChainInfoResponse(chain_info_response) => {
                             Ok(Some(RpcMessage::ChainInfoResponse(Box::new(
@@ -283,7 +283,7 @@ impl mass_client::MassClient for Client {
                         }
                         Inner::Error(error) => {
                             let error = bincode::deserialize::<NodeError>(&error)
-                                .map_err(ProtoConversionError::BincodeError)?;
+                                .map_err(GrpcProtoConversionError::BincodeError)?;
                             tracing::error!(?error, "received error response");
                             Ok(None)
                         }

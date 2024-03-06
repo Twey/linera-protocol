@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
-pub enum Error {
+pub enum MassClientError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("tonic transport: {0}")]

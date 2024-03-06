@@ -9,13 +9,13 @@ use tonic::transport::{Channel, Endpoint};
 
 /// A pool of transport channels to be used by Grpc.
 #[derive(Clone, Default)]
-pub struct ConnectionPool {
+pub struct GrpcConnectionPool {
     connect_timeout: Option<Duration>,
     timeout: Option<Duration>,
     channels: DashMap<String, Channel>,
 }
 
-impl ConnectionPool {
+impl GrpcConnectionPool {
     pub fn with_connect_timeout(mut self, connect_timeout: impl Into<Option<Duration>>) -> Self {
         self.connect_timeout = connect_timeout.into();
         self

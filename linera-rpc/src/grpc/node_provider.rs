@@ -1,7 +1,7 @@
 // Copyright (c) Zefchain Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::Client;
+use super::GrpcClient;
 
 use crate::{config::ValidatorPublicNetworkConfig, node_provider::NodeOptions};
 
@@ -10,15 +10,15 @@ use linera_core::node::{NodeError, ValidatorNodeProvider};
 use std::str::FromStr as _;
 
 #[derive(Copy, Clone)]
-pub struct NodeProvider(NodeOptions);
+pub struct GrpcNodeProvider(NodeOptions);
 
-impl NodeProvider {
+impl GrpcNodeProvider {
     pub fn new(options: NodeOptions) -> Self {
         Self(options)
     }
 }
 
-impl ValidatorNodeProvider for NodeProvider {
+impl ValidatorNodeProvider for GprcNodeProvider {
     type Node = Client;
 
     fn make_node(&self, address: &str) -> anyhow::Result<Self::Node, NodeError> {
