@@ -61,8 +61,8 @@ impl ValidatorNode for DummyValidatorNode {
         Err(NodeError::UnexpectedMessage)
     }
 
-    async fn subscribe(&mut self, _: Vec<ChainId>) -> Result<NotificationStream, NodeError> {
-        Err(NodeError::UnexpectedMessage)
+    fn subscribe(&mut self, _: Vec<ChainId>) -> NotificationStream {
+        Box::pin(futures::stream::iter([Err(NodeError::UnexpectedMessage)]))
     }
 
     async fn get_version_info(&mut self) -> Result<VersionInfo, NodeError> {

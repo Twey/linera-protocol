@@ -140,9 +140,13 @@ where
         .await
     }
 
-    async fn subscribe(&mut self, chains: Vec<ChainId>) -> Result<NotificationStream, NodeError> {
-        self.spawn_and_receive(move |validator, sender| validator.do_subscribe(chains, sender))
-            .await
+    fn subscribe(&mut self, chains: Vec<ChainId>) -> NotificationStream {
+        use futures::{future::FutureExt as _, stream::StreamExt as _};
+        Box::pin(
+            self.spawn_and_receive(move |validator, sender| validator.do_subscribe(chains, sender))
+                .into_stream()
+                .flatten(),
+        )
     }
 
     async fn get_version_info(&mut self) -> Result<VersionInfo, NodeError> {
@@ -177,7 +181,7 @@ where
 
     /// Executes the future produced by `f` in a new thread in a new Tokio runtime.
     /// Returns the value that the future puts into the sender.
-    async fn spawn_and_receive<F, R, T>(&self, f: F) -> T
+    fn spawn_and_receive<F, R, T>(&self, f: F) -> impl Future<Output = T>
     where
         T: Send + 'static,
         R: Future<Output = Result<(), T>> + Send,
@@ -185,12 +189,12 @@ where
     {
         let validator = self.clone();
         let (sender, receiver) = oneshot::channel();
-        tokio::spawn(async move {
+        tokio::spawn(async {
             if f(validator, sender).await.is_err() {
                 tracing::debug!("result could not be sent");
             }
         });
-        receiver.await.unwrap()
+        async { receiver.await.unwrap() }
     }
 
     async fn do_handle_block_proposal(
@@ -304,12 +308,13 @@ where
     async fn do_subscribe(
         self,
         chains: Vec<ChainId>,
-        sender: oneshot::Sender<Result<NotificationStream, NodeError>>,
-    ) -> Result<(), Result<NotificationStream, NodeError>> {
+        sender: oneshot::Sender<NotificationStream>,
+    ) -> Result<(), NotificationStream> {
+        use futures::stream::StreamExt as _;
         let validator = self.client.lock().await;
         let rx = validator.notifier.subscribe(chains);
-        let stream: NotificationStream = Box::pin(UnboundedReceiverStream::new(rx));
-        sender.send(Ok(stream))
+        let stream: NotificationStream = Box::pin(UnboundedReceiverStream::new(rx).map(Ok));
+        sender.send(stream)
     }
 }
 

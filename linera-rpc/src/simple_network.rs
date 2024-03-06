@@ -441,10 +441,11 @@ impl ValidatorNode for SimpleClient {
         self.query(query.into()).await
     }
 
-    async fn subscribe(&mut self, _chains: Vec<ChainId>) -> Result<NotificationStream, NodeError> {
-        Err(NodeError::SubscriptionError {
-            transport: self.network.protocol.to_string(),
-        })
+    fn subscribe(&mut self, _chains: Vec<ChainId>) -> NotificationStream {
+        let transport = self.network.protocol.to_string();
+        Box::pin(futures::stream::once(async {
+            Err(NodeError::SubscriptionError { transport })
+        }))
     }
 
     async fn get_version_info(&mut self) -> Result<VersionInfo, NodeError> {

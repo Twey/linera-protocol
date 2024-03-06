@@ -90,11 +90,11 @@ impl ValidatorNode for Client {
         }
     }
 
-    async fn subscribe(&mut self, chains: Vec<ChainId>) -> Result<NotificationStream, NodeError> {
-        Ok(match self {
-            Client::Grpc(grpc_client) => Box::pin(grpc_client.subscribe(chains).await?),
-            Client::Simple(simple_client) => Box::pin(simple_client.subscribe(chains).await?),
-        })
+    fn subscribe(&mut self, chains: Vec<ChainId>) -> NotificationStream {
+        match self {
+            Client::Grpc(grpc_client) => grpc_client.subscribe(chains),
+            Client::Simple(simple_client) => simple_client.subscribe(chains),
+        }
     }
 
     async fn get_version_info(&mut self) -> Result<linera_version::VersionInfo, NodeError> {

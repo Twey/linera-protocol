@@ -512,10 +512,18 @@ where
         name: ValidatorName,
         node: A,
         mut local_node: LocalNodeClient<S>,
-        notification: Notification,
+        notification: Result<Notification, NodeError>,
     ) where
         A: ValidatorNode + Send + Sync + 'static + Clone,
     {
+        let notification = match notification {
+            Ok(notification) => notification,
+            Err(e) => {
+                error!("Notification error: {e}");
+                return;
+            }
+        };
+
         match notification.reason {
             Reason::NewIncomingMessage { origin, height } => {
                 if Self::local_next_block_height(this.clone(), origin.sender, &mut local_node).await
@@ -603,7 +611,7 @@ where
         }
         tokio::spawn(async move {
             while let Some(notification) = notifications.next().await {
-                if matches!(notification.reason, Reason::NewBlock { .. }) {
+                if matches!(notification.map(|x| x.reason), Ok(Reason::NewBlock { .. })) {
                     if let Err(err) = Self::update_streams(&this, &mut senders).await {
                         error!("Failed to update committee: {}", err);
                     }
@@ -638,13 +646,7 @@ where
             let hash_map::Entry::Vacant(entry) = senders.entry(name) else {
                 continue;
             };
-            let (mut stream, abort) = match node.subscribe(vec![chain_id]).await {
-                Err(error) => {
-                    info!(?error, "Could not connect to validator {name}");
-                    continue;
-                }
-                Ok(stream) => stream::abortable(stream),
-            };
+            let (mut stream, abort) = stream::abortable(node.subscribe(vec![chain_id]));
             let this = this.clone();
             let local_node = local_node.clone();
             tokio::spawn(async move {

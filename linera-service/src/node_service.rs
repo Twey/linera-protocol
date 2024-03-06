@@ -206,9 +206,10 @@ where
     async fn notifications(
         &self,
         chain_id: ChainId,
-    ) -> Result<impl Stream<Item = Notification>, Error> {
+    ) -> Result<impl Stream<Item = Result<Notification, Error>>, Error> {
+        use futures::stream::TryStreamExt as _;
         let mut client = self.clients.try_client_lock(&chain_id).await?;
-        Ok(client.subscribe().await?)
+        Ok(client.subscribe().await?.err_into::<Error>())
     }
 }
 
@@ -1082,11 +1083,19 @@ where
 
 /// Returns after the specified time or if we receive a notification that a new round has started.
 pub async fn wait_for_next_round(stream: NotificationStream, timeout: RoundTimeout) {
-    let mut stream = stream.filter(|notification| match &notification.reason {
-        Reason::NewBlock { height, .. } => *height >= timeout.next_block_height,
-        Reason::NewRound { round, .. } => *round > timeout.current_round,
-        Reason::NewIncomingMessage { .. } => false,
-    });
+    let mut stream = stream
+        .filter_map(|result| match result {
+            Ok(x) => Some(x),
+            Err(e) => {
+                error!("Notification error: {e}");
+                None
+            }
+        })
+        .filter(|notification| match &notification.reason {
+            Reason::NewBlock { height, .. } => *height >= timeout.next_block_height,
+            Reason::NewRound { round, .. } => *round > timeout.current_round,
+            Reason::NewIncomingMessage { .. } => false,
+        });
     future::select(
         Box::pin(stream.next()),
         Box::pin(tokio::time::sleep(

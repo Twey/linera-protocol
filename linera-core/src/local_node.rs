@@ -134,9 +134,10 @@ where
         &mut self,
         chains: Vec<ChainId>,
     ) -> Result<NotificationStream, LocalNodeError> {
+        use futures::stream::StreamExt as _;
         let node = self.node.lock().await;
         let rx = node.notifier.subscribe(chains);
-        Ok(Box::pin(UnboundedReceiverStream::new(rx)))
+        Ok(Box::pin(UnboundedReceiverStream::new(rx).map(Ok)))
     }
 }
 

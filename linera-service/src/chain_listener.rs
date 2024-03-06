@@ -141,6 +141,14 @@ where
             stream
         };
         while let Some(notification) = local_stream.next().await {
+            let notification = match notification {
+                Ok(notification) => notification,
+                Err(e) => {
+                    error!("Error retrieving notification: {e}");
+                    continue;
+                }
+            };
+
             info!("Received new notification: {:?}", notification);
             if config.delay_before_ms > 0 {
                 tokio::time::sleep(Duration::from_millis(config.delay_before_ms)).await;

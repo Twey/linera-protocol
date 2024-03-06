@@ -704,6 +704,80 @@ impl GrpcClient {
             }
         }
     }
+
+    #[instrument(target = "grpc_client", skip_all, err)]
+    fn subscribe_to_chains(
+        notification_retry_delay: Duration,
+        notification_retries: u32,
+        mut client: ValidatorNodeClient<Channel>,
+        chains: Vec<ChainId>,
+    ) -> impl std::future::Future<Output = Result<NotificationStream, NodeError>> {
+        let mut retry_count = 0;
+        let subscription_request = SubscriptionRequest {
+            chain_ids: chains.into_iter().map(|chain| chain.into()).collect(),
+        };
+
+        async {
+            // Make the first connection attempt before returning from this method.
+            let mut stream = Some(
+                client
+                    .subscribe(subscription_request.clone())
+                    .await
+                    .map_err(|status| NodeError::SubscriptionFailed {
+                        status: status.to_string(),
+                    })?
+                    .into_inner(),
+            );
+
+            // A stream of `Result<grpc::Notification, tonic::Status>` that keeps calling
+            // `client.subscribe(request)` endlessly and without delay.
+            let endlessly_retrying_notification_stream = stream::unfold((), move |()| {
+                let mut client = client.clone();
+                let subscription_request = subscription_request.clone();
+                let mut stream = stream.take();
+                async move {
+                    let stream = if let Some(stream) = stream.take() {
+                        future::Either::Right(stream)
+                    } else {
+                        match client.subscribe(subscription_request.clone()).await {
+                            Err(err) => future::Either::Left(stream::iter(iter::once(Err(err)))),
+                            Ok(response) => future::Either::Right(response.into_inner()),
+                        }
+                    };
+                    Some((stream, ()))
+                }
+            })
+            .flatten();
+
+            // The stream of `Notification`s that inserts increasing delays after retriable errors, and
+            // terminates after unexpected or fatal errors.
+            let notification_stream = endlessly_retrying_notification_stream
+                .map(|result| {
+                    Notification::try_from(result?).map_err(|err| {
+                        let message = format!("Could not deserialize notification: {}", err);
+                        tonic::Status::new(Code::Internal, message)
+                    })
+                })
+                .take_while(move |result| {
+                    let Err(status) = result else {
+                        retry_count = 0;
+                        return future::Either::Left(future::ready(true));
+                    };
+                    if !Self::is_retryable(status) || retry_count >= notification_retries {
+                        return future::Either::Left(future::ready(false));
+                    }
+                    let delay = notification_retry_delay.saturating_mul(retry_count);
+                    retry_count += 1;
+                    future::Either::Right(async move {
+                        tokio::time::sleep(delay).await;
+                        true
+                    })
+                })
+                .filter_map(|result| future::ready(result.ok().map(Ok)));
+
+            Ok(Box::pin(notification_stream) as NotificationStream)
+        }
+    }
 }
 
 macro_rules! client_delegate {
@@ -792,78 +866,25 @@ impl ValidatorNode for GrpcClient {
     }
 
     #[instrument(target = "grpc_client", skip_all, err, fields(address = self.address))]
-    async fn subscribe(&mut self, chains: Vec<ChainId>) -> Result<NotificationStream, NodeError> {
-        let notification_retry_delay = self.notification_retry_delay;
-        let notification_retries = self.notification_retries;
-        let mut retry_count = 0;
-        let subscription_request = SubscriptionRequest {
-            chain_ids: chains.into_iter().map(|chain| chain.into()).collect(),
-        };
-        let mut client = self.client.clone();
-
-        // Make the first connection attempt before returning from this method.
-        let mut stream = Some(
-            client
-                .subscribe(subscription_request.clone())
-                .await
-                .map_err(|status| NodeError::SubscriptionFailed {
-                    status: status.to_string(),
-                })?
-                .into_inner(),
-        );
-
-        // A stream of `Result<grpc::Notification, tonic::Status>` that keeps calling
-        // `client.subscribe(request)` endlessly and without delay.
-        let endlessly_retrying_notification_stream = stream::unfold((), move |()| {
-            let mut client = client.clone();
-            let subscription_request = subscription_request.clone();
-            let mut stream = stream.take();
-            async move {
-                let stream = if let Some(stream) = stream.take() {
-                    future::Either::Right(stream)
-                } else {
-                    match client.subscribe(subscription_request.clone()).await {
-                        Err(err) => future::Either::Left(stream::iter(iter::once(Err(err)))),
-                        Ok(response) => future::Either::Right(response.into_inner()),
-                    }
-                };
-                Some((stream, ()))
-            }
-        })
-        .flatten();
-
-        // The stream of `Notification`s that inserts increasing delays after retriable errors, and
-        // terminates after unexpected or fatal errors.
-        let notification_stream = endlessly_retrying_notification_stream
-            .map(|result| {
-                Notification::try_from(result?).map_err(|err| {
-                    let message = format!("Could not deserialize notification: {}", err);
-                    tonic::Status::new(Code::Internal, message)
-                })
-            })
-            .take_while(move |result| {
-                let Err(status) = result else {
-                    retry_count = 0;
-                    return future::Either::Left(future::ready(true));
-                };
-                if !Self::is_retryable(status) || retry_count >= notification_retries {
-                    return future::Either::Left(future::ready(false));
-                }
-                let delay = notification_retry_delay.saturating_mul(retry_count);
-                retry_count += 1;
-                future::Either::Right(async move {
-                    tokio::time::sleep(delay).await;
-                    true
-                })
-            })
-            .filter_map(|result| future::ready(result.ok()));
-
-        Ok(Box::pin(notification_stream))
-    }
-
-    #[instrument(target = "grpc_client", skip_all, err, fields(address = self.address))]
     async fn get_version_info(&mut self) -> Result<VersionInfo, NodeError> {
         Ok(self.client.get_version_info(()).await?.into_inner().into())
+    }
+
+    fn subscribe(&mut self, chains: Vec<ChainId>) -> NotificationStream {
+        use futures::future::TryFutureExt as _;
+        Box::pin(
+            Self::subscribe_to_chains(
+                self.notification_retry_delay,
+                self.notification_retries,
+                self.client.clone(),
+                chains,
+            )
+            .map_ok_or_else(
+                |e| Box::pin(futures::stream::iter([Err(e)])) as NotificationStream,
+                |x| x,
+            )
+            .flatten_stream(),
+        )
     }
 }
 

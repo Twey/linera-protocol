@@ -7,7 +7,6 @@ use crate::{
     worker::{Notification, WorkerError},
 };
 use async_trait::async_trait;
-use futures::Stream;
 use linera_base::{
     crypto::CryptoError,
     data_types::{ArithmeticError, BlockHeight},
@@ -24,11 +23,10 @@ use linera_execution::{
 use linera_version::VersionInfo;
 use linera_views::views::ViewError;
 use serde::{Deserialize, Serialize};
-use std::pin::Pin;
 use thiserror::Error;
 
 /// A pinned [`Stream`] of Notifications.
-pub type NotificationStream = Pin<Box<dyn Stream<Item = Notification> + Send>>;
+pub type NotificationStream = futures::stream::BoxStream<'static, Result<Notification, NodeError>>;
 
 /// Whether to wait for the delivery of outgoing cross-chain messages.
 #[derive(Debug, Default, Clone, Copy)]
@@ -72,7 +70,7 @@ pub trait ValidatorNode {
     async fn get_version_info(&mut self) -> Result<VersionInfo, NodeError>;
 
     /// Subscribes to receiving notifications for a collection of chains.
-    async fn subscribe(&mut self, chains: Vec<ChainId>) -> Result<NotificationStream, NodeError>;
+    fn subscribe(&mut self, chains: Vec<ChainId>) -> NotificationStream;
 }
 
 /// Turn an address into a validator node.

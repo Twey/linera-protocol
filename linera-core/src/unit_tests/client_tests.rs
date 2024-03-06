@@ -137,10 +137,10 @@ where
     }
     assert_matches!(
         notifications.next().await,
-        Some(Notification {
+        Some(Ok(Notification {
             reason: Reason::NewBlock { height, .. },
             chain_id,
-        }) if chain_id == ChainId::root(1) && height == BlockHeight::ZERO
+        })) if chain_id == ChainId::root(1) && height == BlockHeight::ZERO
     );
     Ok(())
 }
