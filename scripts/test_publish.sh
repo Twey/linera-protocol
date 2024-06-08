@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Use a local registry to simulate publishing crates from the current workspace.
 #
@@ -17,24 +17,27 @@ mkdir -p "$2"
 REGISTRY="$(cd "$2"; pwd)"
 
 # Make sure we're running from a clean repo.
-if [ ! -z "$(git status --porcelain .cargo/config.toml)" ]; then
+if [ -f .cargo/config.toml ] && ! [ -z "$(git status --porcelain .cargo/config.toml)" ]; then
     echo "The file .cargo/config.toml has uncommitted changes"
     exit 1
 fi
 
 # Synchronize the registry using `Cargo.lock`.
+mkdir -p .cargo
+touch .cargo/config.toml
+cp .cargo/config.toml{,.bk}
 (echo; echo '[source]') >> .cargo/config.toml
 cargo local-registry --git -s Cargo.lock "$REGISTRY" | tail -n +2 >> .cargo/config.toml
 
 echo "The following change was applied to .cargo/config.toml and should be reverted on exit:"
-git diff | cat
+diff .cargo/config{,.bk}
 LINERA_DIR="$PWD"
-trap 'cd "$LINERA_DIR"; git checkout -f HEAD .cargo/config.toml' EXIT
+trap 'cd "$LINERA_DIR"; mv .cargo/config.toml{.bk,}' EXIT
 
 # Initialize the git repository for the index if needed. Ideally, we'd like to use `cargo
 # index init` first but the tool refuses to update an existing directory.
 git init "$REGISTRY"/index || true
-(cd "$REGISTRY"/index; git add .; git commit -m 'update registry')
+(cd "$REGISTRY"/index; git add .; git commit -m 'update registry' ||:)
 
 # Build the packages in order and add them to the local registry.
 grep -v '^#' "$1" | while read LINE; do
