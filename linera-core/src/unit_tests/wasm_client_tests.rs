@@ -110,7 +110,7 @@ where
         .unwrap()
         .unwrap();
     publisher
-        .receive_certificate_and_update_validators(cert)
+        .receive_certificate_and_update_validators(&cert)
         .await
         .unwrap();
     publisher.process_inbox().await.unwrap();
@@ -172,7 +172,7 @@ where
     let bytecode_id = bytecode_id.with_abi::<counter::CounterAbi, (), u64>();
     // Receive our own cert to broadcast the bytecode location.
     publisher
-        .receive_certificate_and_update_validators(cert)
+        .receive_certificate_and_update_validators(&cert)
         .await
         .unwrap();
     publisher.process_inbox().await.unwrap();
@@ -330,7 +330,7 @@ where
         .unwrap()
         .unwrap();
     publisher
-        .receive_certificate_and_update_validators(cert)
+        .receive_certificate_and_update_validators(&cert)
         .await
         .unwrap();
     publisher.process_inbox().await.unwrap();
@@ -364,11 +364,11 @@ where
         bytecode_id2.with_abi::<meta_counter::MetaCounterAbi, ApplicationId<CounterAbi>, ()>();
     // Receive our own certs to broadcast the bytecode locations.
     publisher
-        .receive_certificate_and_update_validators(cert1)
+        .receive_certificate_and_update_validators(&cert1)
         .await
         .unwrap();
     publisher
-        .receive_certificate_and_update_validators(cert2)
+        .receive_certificate_and_update_validators(&cert2)
         .await
         .unwrap();
     publisher.process_inbox().await.unwrap();
@@ -416,7 +416,7 @@ where
         .unwrap();
 
     receiver
-        .receive_certificate_and_update_validators(cert)
+        .receive_certificate_and_update_validators(&cert)
         .await
         .unwrap();
     let (cert, _) = receiver.process_inbox().await.unwrap();
@@ -451,7 +451,7 @@ where
         .unwrap();
 
     receiver
-        .receive_certificate_and_update_validators(cert)
+        .receive_certificate_and_update_validators(&cert)
         .await
         .unwrap();
     let mut certs = receiver.process_inbox().await.unwrap().0;
@@ -475,7 +475,7 @@ where
         .unwrap();
 
     receiver
-        .receive_certificate_and_update_validators(cert)
+        .receive_certificate_and_update_validators(&cert)
         .await
         .unwrap();
     let mut certs = receiver.process_inbox().await.unwrap().0;
@@ -490,7 +490,7 @@ where
 
     // The bounced message is marked as "bouncing" in the Wasm context and succeeds.
     creator
-        .receive_certificate_and_update_validators(cert)
+        .receive_certificate_and_update_validators(&cert)
         .await
         .unwrap();
     let mut certs = creator.process_inbox().await.unwrap().0;
@@ -589,7 +589,7 @@ where
 
     // Receive our own cert to broadcast the bytecode location.
     sender
-        .receive_certificate_and_update_validators(pub_cert.clone())
+        .receive_certificate_and_update_validators(&pub_cert)
         .await
         .unwrap();
     sender.process_inbox().await.unwrap();
@@ -640,7 +640,7 @@ where
     }
     receiver.synchronize_from_validators().await.unwrap();
     receiver
-        .receive_certificate_and_update_validators(cert)
+        .receive_certificate_and_update_validators(&cert)
         .await
         .unwrap();
     let certs = receiver.process_inbox().await.unwrap().0;
@@ -676,7 +676,7 @@ where
         .unwrap();
 
     receiver
-        .receive_certificate_and_update_validators(cert)
+        .receive_certificate_and_update_validators(&cert)
         .await
         .unwrap();
     let certs = receiver.process_inbox().await.unwrap().0;
@@ -806,7 +806,7 @@ where
 
     // Receive our own cert to broadcast the bytecode location.
     receiver
-        .receive_certificate_and_update_validators(pub_cert.clone())
+        .receive_certificate_and_update_validators(&pub_cert)
         .await
         .unwrap();
     receiver.process_inbox().await.unwrap();
@@ -830,7 +830,7 @@ where
     // Subscribe the receiver. This also registers the application.
     sender.synchronize_from_validators().await.unwrap();
     sender
-        .receive_certificate_and_update_validators(cert)
+        .receive_certificate_and_update_validators(&cert)
         .await
         .unwrap();
     let _certs = sender.process_inbox().await.unwrap();
@@ -845,7 +845,7 @@ where
         .unwrap();
 
     receiver
-        .receive_certificate_and_update_validators(cert.clone())
+        .receive_certificate_and_update_validators(&cert)
         .await
         .unwrap();
     let certs = receiver.process_inbox().await.unwrap().0;
@@ -891,7 +891,7 @@ where
     // Unsubscribe the receiver.
     sender.synchronize_from_validators().await.unwrap();
     sender
-        .receive_certificate_and_update_validators(cert)
+        .receive_certificate_and_update_validators(&cert)
         .await
         .unwrap();
     let _certs = sender.process_inbox().await.unwrap();
@@ -908,7 +908,7 @@ where
 
     // The post will not be received by the unsubscribed chain.
     receiver
-        .receive_certificate_and_update_validators(cert)
+        .receive_certificate_and_update_validators(&cert)
         .await
         .unwrap();
     let certs = receiver.process_inbox().await.unwrap().0;

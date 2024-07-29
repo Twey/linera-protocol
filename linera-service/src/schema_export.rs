@@ -54,7 +54,7 @@ impl ValidatorNode for DummyValidatorNode {
 
     async fn handle_certificate(
         &self,
-        _: Certificate,
+        _: &Certificate,
         _: Vec<HashedCertificateValue>,
         _: Vec<HashedBlob>,
         _delivery: CrossChainMessageDelivery,

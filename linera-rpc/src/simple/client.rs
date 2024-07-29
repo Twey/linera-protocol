@@ -99,14 +99,14 @@ impl ValidatorNode for SimpleClient {
     /// Processes a certificate.
     async fn handle_certificate(
         &self,
-        certificate: Certificate,
+        certificate: &Certificate,
         hashed_certificate_values: Vec<HashedCertificateValue>,
         hashed_blobs: Vec<HashedBlob>,
         delivery: CrossChainMessageDelivery,
     ) -> Result<ChainInfoResponse, NodeError> {
         let wait_for_outgoing_messages = delivery.wait_for_outgoing_messages();
         let request = HandleCertificateRequest {
-            certificate,
+            certificate: certificate.clone(),
             hashed_certificate_values,
             hashed_blobs,
             wait_for_outgoing_messages,

@@ -530,7 +530,12 @@ where
         match self
             .state
             .clone()
-            .handle_certificate(certificate, hashed_certificate_values, hashed_blobs, sender)
+            .handle_certificate(
+                &certificate,
+                hashed_certificate_values,
+                hashed_blobs,
+                sender,
+            )
             .await
         {
             Ok((info, actions)) => {

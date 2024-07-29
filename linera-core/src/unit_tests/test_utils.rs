@@ -132,11 +132,12 @@ where
 
     async fn handle_certificate(
         &self,
-        certificate: Certificate,
+        certificate: &Certificate,
         hashed_certificate_values: Vec<HashedCertificateValue>,
         hashed_blobs: Vec<HashedBlob>,
         _delivery: CrossChainMessageDelivery,
     ) -> Result<ChainInfoResponse, NodeError> {
+        let certificate = certificate.clone();
         self.spawn_and_receive(move |validator, sender| {
             validator.do_handle_certificate(
                 certificate,
@@ -327,7 +328,7 @@ where
                 validator
                     .state
                     .fully_handle_certificate_with_notifications(
-                        certificate,
+                        &certificate,
                         hashed_certificate_values,
                         hashed_blobs,
                         Some(notifications),

@@ -755,7 +755,7 @@ where
     pub async fn update_wallet_from_certificates(&mut self, certificates: Vec<Certificate>) {
         let node = self.client.local_node().clone();
         // Replay the certificates locally.
-        for certificate in certificates {
+        for certificate in &certificates {
             // No required certificates from other chains: This is only used with benchmark.
             node.handle_certificate(certificate, vec![], vec![], &mut vec![])
                 .await

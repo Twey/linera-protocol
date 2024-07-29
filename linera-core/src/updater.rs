@@ -219,18 +219,16 @@ where
             }
         }
         self.node
-            .handle_certificate(certificate.clone(), vec![], vec![], delivery)
+            .handle_certificate(certificate, vec![], vec![], delivery)
             .await
     }
 
     async fn send_certificate(
         &mut self,
-        certificate: Certificate,
+        certificate: &Certificate,
         delivery: CrossChainMessageDelivery,
     ) -> Result<Box<ChainInfo>, NodeError> {
-        let result = self
-            .send_optimized_certificate(&certificate, delivery)
-            .await;
+        let result = self.send_optimized_certificate(certificate, delivery).await;
 
         let response = match &result {
             Err(
@@ -238,11 +236,11 @@ where
             ) => {
                 let values = self
                     .local_node
-                    .find_missing_application_bytecodes(&certificate, locations)
+                    .find_missing_application_bytecodes(certificate, locations)
                     .await?;
                 let blobs = self
                     .local_node
-                    .find_missing_blobs(&certificate, blob_ids, certificate.value().chain_id())
+                    .find_missing_blobs(certificate, blob_ids, certificate.value().chain_id())
                     .await?;
                 ensure!(
                     values.len() == locations.len() && blobs.len() == blob_ids.len(),
@@ -354,12 +352,12 @@ where
             let storage = self.local_node.storage_client();
             let certs = storage.read_certificates(keys.into_iter()).await?;
             for cert in certs {
-                self.send_certificate(cert, delivery).await?;
+                self.send_certificate(&cert, delivery).await?;
             }
         }
         if let Some(cert) = manager.timeout {
             if cert.value().is_timeout() && cert.value().chain_id() == chain_id {
-                self.send_certificate(cert, CrossChainMessageDelivery::NonBlocking)
+                self.send_certificate(&cert, CrossChainMessageDelivery::NonBlocking)
                     .await?;
             }
         }
@@ -420,7 +418,7 @@ where
                 certificate,
                 delivery,
             } => {
-                let info = self.send_certificate(certificate, delivery).await?;
+                let info = self.send_certificate(&certificate, delivery).await?;
                 info.manager.pending
             }
             CommunicateAction::RequestTimeout { .. } => {

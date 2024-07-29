@@ -374,7 +374,7 @@ where
     #[cfg(with_testing)]
     pub async fn fully_handle_certificate(
         &self,
-        certificate: Certificate,
+        certificate: &Certificate,
         hashed_certificate_values: Vec<HashedCertificateValue>,
         hashed_blobs: Vec<HashedBlob>,
     ) -> Result<ChainInfoResponse, WorkerError> {
@@ -400,7 +400,7 @@ where
     #[inline]
     pub(crate) async fn fully_handle_certificate_with_notifications(
         &self,
-        certificate: Certificate,
+        certificate: &Certificate,
         hashed_certificate_values: Vec<HashedCertificateValue>,
         hashed_blobs: Vec<HashedBlob>,
         mut notifications: Option<&mut impl Extend<Notification>>,
@@ -527,7 +527,7 @@ where
     )]
     async fn process_confirmed_block(
         &self,
-        certificate: Certificate,
+        certificate: &Certificate,
         hashed_certificate_values: &[HashedCertificateValue],
         hashed_blobs: &[HashedBlob],
         notify_when_messages_are_delivered: Option<oneshot::Sender<()>>,
@@ -541,7 +541,7 @@ where
         let (response, actions) = self
             .query_chain_worker(chain_id, move |callback| {
                 ChainWorkerRequest::ProcessConfirmedBlock {
-                    certificate,
+                    certificate: certificate.clone(),
                     hashed_certificate_values: hashed_certificate_values.to_owned(),
                     hashed_blobs: hashed_blobs.to_owned(),
                     callback,
@@ -567,7 +567,7 @@ where
     #[tracing::instrument(level = "trace", skip(self, certificate))]
     async fn process_validated_block(
         &self,
-        certificate: Certificate,
+        certificate: &Certificate,
         hashed_certificate_values: &[HashedCertificateValue],
         hashed_blobs: &[HashedBlob],
     ) -> Result<(ChainInfoResponse, NetworkActions, bool), WorkerError> {
@@ -579,7 +579,7 @@ where
         };
         self.query_chain_worker(block.chain_id, move |callback| {
             ChainWorkerRequest::ProcessValidatedBlock {
-                certificate,
+                certificate: certificate.clone(),
                 hashed_certificate_values: hashed_certificate_values.to_owned(),
                 hashed_blobs: hashed_blobs.to_owned(),
                 callback,
@@ -592,14 +592,14 @@ where
     #[tracing::instrument(level = "trace", skip(self, certificate))]
     async fn process_timeout(
         &self,
-        certificate: Certificate,
+        certificate: &Certificate,
     ) -> Result<(ChainInfoResponse, NetworkActions), WorkerError> {
         let CertificateValue::Timeout { chain_id, .. } = certificate.value() else {
             panic!("Expecting a leader timeout certificate");
         };
         self.query_chain_worker(*chain_id, move |callback| {
             ChainWorkerRequest::ProcessTimeout {
-                certificate,
+                certificate: certificate.clone(),
                 callback,
             }
         })
@@ -812,7 +812,7 @@ where
     ) -> Result<(ChainInfoResponse, NetworkActions), WorkerError> {
         let full_cert = self.full_certificate(certificate).await?;
         self.handle_certificate(
-            full_cert,
+            &full_cert,
             vec![],
             vec![],
             notify_when_messages_are_delivered,
@@ -828,7 +828,7 @@ where
     ))]
     pub async fn handle_certificate(
         &self,
-        certificate: Certificate,
+        certificate: &Certificate,
         hashed_certificate_values: Vec<HashedCertificateValue>,
         hashed_blobs: Vec<HashedBlob>,
         notify_when_messages_are_delivered: Option<oneshot::Sender<()>>,

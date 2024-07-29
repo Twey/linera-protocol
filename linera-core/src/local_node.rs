@@ -117,7 +117,7 @@ where
             .node
             .state
             .fully_handle_certificate_with_notifications(
-                full_cert,
+                &full_cert,
                 vec![],
                 vec![],
                 Some(notifications),
@@ -129,7 +129,7 @@ where
     #[tracing::instrument(level = "trace", skip_all)]
     pub async fn handle_certificate(
         &self,
-        certificate: Certificate,
+        certificate: &Certificate,
         hashed_certificate_values: Vec<HashedCertificateValue>,
         hashed_blobs: Vec<HashedBlob>,
         notifications: &mut impl Extend<Notification>,
@@ -350,7 +350,7 @@ where
         notifications: &mut impl Extend<Notification>,
     ) -> Option<Box<ChainInfo>> {
         let mut info = None;
-        for certificate in certificates {
+        for certificate in &certificates {
             let hash = certificate.hash();
             if !certificate.value().is_confirmed() || certificate.value().chain_id() != chain_id {
                 // The certificate is not as expected. Give up.
@@ -358,7 +358,7 @@ where
                 return info;
             }
             let mut result = self
-                .handle_certificate(certificate.clone(), vec![], vec![], notifications)
+                .handle_certificate(certificate, vec![], vec![], notifications)
                 .await;
 
             result = match &result {

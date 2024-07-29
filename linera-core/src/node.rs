@@ -60,7 +60,7 @@ pub trait LocalValidatorNode {
     /// Processes a certificate.
     async fn handle_certificate(
         &self,
-        certificate: Certificate,
+        certificate: &Certificate,
         hashed_certificate_values: Vec<HashedCertificateValue>,
         hashed_blobs: Vec<HashedBlob>,
         delivery: CrossChainMessageDelivery,
