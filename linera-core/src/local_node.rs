@@ -116,7 +116,7 @@ where
         let response = self
             .node
             .state
-            .fully_handle_certificate_with_notifications(
+            .fully_handle_certificate(
                 full_cert,
                 vec![],
                 vec![],
@@ -134,7 +134,7 @@ where
         blobs: Vec<Blob>,
         notifications: &mut impl Extend<Notification>,
     ) -> Result<ChainInfoResponse, LocalNodeError> {
-        let response = Box::pin(self.node.state.fully_handle_certificate_with_notifications(
+        let response = Box::pin(self.node.state.fully_handle_certificate(
             certificate,
             hashed_certificate_values,
             blobs,

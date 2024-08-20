@@ -323,7 +323,7 @@ where
             | FaultType::DontSendValidateVote => Some(
                 validator
                     .state
-                    .fully_handle_certificate_with_notifications(
+                    .fully_handle_certificate(
                         certificate,
                         hashed_certificate_values,
                         blobs,

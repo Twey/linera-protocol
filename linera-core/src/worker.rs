@@ -362,32 +362,9 @@ where
     ViewError: From<StorageClient::StoreError>,
 {
     // NOTE: This only works for non-sharded workers!
-    #[tracing::instrument(
-        level = "trace",
-        skip(self, certificate, hashed_certificate_values, blobs)
-    )]
-    #[cfg(with_testing)]
-    pub async fn fully_handle_certificate(
-        &self,
-        certificate: Certificate,
-        hashed_certificate_values: Vec<HashedCertificateValue>,
-        blobs: Vec<Blob>,
-    ) -> Result<ChainInfoResponse, WorkerError> {
-        self.fully_handle_certificate_with_notifications(
-            certificate,
-            hashed_certificate_values,
-            blobs,
-            None::<&mut Vec<Notification>>,
-        )
-        .await
-    }
-
-    #[tracing::instrument(
-        level = "trace",
-        skip(self, certificate, hashed_certificate_values, blobs, notifications)
-    )]
+    #[tracing::instrument(level = "trace", skip_all)]
     #[inline]
-    pub(crate) async fn fully_handle_certificate_with_notifications(
+    pub(crate) async fn fully_handle_certificate(
         &self,
         certificate: Certificate,
         hashed_certificate_values: Vec<HashedCertificateValue>,

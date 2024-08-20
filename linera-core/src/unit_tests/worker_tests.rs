@@ -545,7 +545,7 @@ where
         make_certificate(&committee, &worker, value)
     };
     worker
-        .fully_handle_certificate(certificate.clone(), vec![], vec![])
+        .fully_handle_certificate(certificate.clone(), vec![], vec![], None::<&mut Vec<_>>)
         .await?;
 
     {
@@ -774,7 +774,7 @@ where
     // Run transfers
     let mut notifications = Vec::new();
     worker
-        .fully_handle_certificate_with_notifications(
+        .fully_handle_certificate(
             certificate0.clone(),
             vec![],
             vec![],
@@ -782,7 +782,7 @@ where
         )
         .await?;
     worker
-        .fully_handle_certificate_with_notifications(
+        .fully_handle_certificate(
             certificate1.clone(),
             vec![],
             vec![],
