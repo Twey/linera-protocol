@@ -5,6 +5,7 @@
 use std::{
     borrow::Cow,
     collections::{hash_map, BTreeMap, HashMap, VecDeque},
+    iter::{Extend, IntoIterator},
     num::NonZeroUsize,
     sync::{Arc, LazyLock, Mutex},
     time::Duration,
@@ -364,24 +365,28 @@ where
     // NOTE: This only works for non-sharded workers!
     #[tracing::instrument(level = "trace", skip_all)]
     #[inline]
-    pub(crate) async fn fully_handle_certificate(
+    pub async fn fully_handle_certificate(
         &self,
         certificate: Certificate,
         hashed_certificate_values: Vec<HashedCertificateValue>,
         blobs: Vec<Blob>,
         mut notifications: Option<&mut impl Extend<Notification>>,
+        cross_chain_filter: impl Fn(&CrossChainRequest) -> bool,
     ) -> Result<ChainInfoResponse, WorkerError> {
         let (response, actions) = self
             .handle_certificate(certificate, hashed_certificate_values, blobs, None)
             .await?;
-        if let Some(ref mut notifications) = notifications {
+        if let Some(notifications) = &mut notifications {
             notifications.extend(actions.notifications);
         }
         let mut requests = VecDeque::from(actions.cross_chain_requests);
         while let Some(request) = requests.pop_front() {
+            if !cross_chain_filter(&request) {
+                continue;
+            }
             let actions = self.handle_cross_chain_request(request).await?;
             requests.extend(actions.cross_chain_requests);
-            if let Some(ref mut notifications) = notifications {
+            if let Some(notifications) = &mut notifications {
                 notifications.extend(actions.notifications);
             }
         }

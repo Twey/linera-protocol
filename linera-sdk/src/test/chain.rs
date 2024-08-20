@@ -119,7 +119,13 @@ impl ActiveChain {
 
         self.validator
             .worker()
-            .fully_handle_certificate(certificate.clone(), vec![], vec![])
+            .fully_handle_certificate(
+                certificate.clone(),
+                vec![],
+                vec![],
+                None::<&mut Vec<_>>,
+                |_| true,
+            )
             .await
             .expect("Rejected certificate");
 

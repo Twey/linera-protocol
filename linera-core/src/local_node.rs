@@ -116,12 +116,7 @@ where
         let response = self
             .node
             .state
-            .fully_handle_certificate(
-                full_cert,
-                vec![],
-                vec![],
-                Some(notifications),
-            )
+            .fully_handle_certificate(full_cert, vec![], vec![], Some(notifications), |_| true)
             .await?;
         Ok(response)
     }
@@ -139,6 +134,7 @@ where
             hashed_certificate_values,
             blobs,
             Some(notifications),
+            |_| true,
         ))
         .await?;
         Ok(response)

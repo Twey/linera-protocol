@@ -328,6 +328,7 @@ where
                         hashed_certificate_values,
                         blobs,
                         Some(notifications),
+                        |_| true,
                     )
                     .await
                     .map_err(Into::into),
