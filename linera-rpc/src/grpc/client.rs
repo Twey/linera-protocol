@@ -308,13 +308,15 @@ impl ValidatorNode for GrpcClient {
 
     #[instrument(target = "grpc_client", skip_all, err, fields(address = self.address))]
     async fn download_certificate(&self, hash: CryptoHash) -> Result<Certificate, NodeError> {
-        Ok(self
-            .client
-            .clone()
-            .download_certificate(<CryptoHash as Into<api::CryptoHash>>::into(hash))
-            .await?
-            .into_inner()
-            .try_into()?)
+        let certificate_result = self.client.clone().download_certificate(<CryptoHash as Into<api::CryptoHash>>::into(hash)).await.map_err(|e| {
+            panic!("a gosh-darned grpc error: {e:?}");
+            e
+        })?;
+        let convertand = certificate_result.into_inner();
+        Ok(convertand.clone().try_into().map_err(|e| {
+            panic!("conversion error converting {convertand:?}: {e}");
+            e
+        })?)
     }
 
     #[instrument(target = "grpc_client", skip_all, err, fields(address = self.address))]

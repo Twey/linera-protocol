@@ -49,7 +49,7 @@ use crate::{
     ChainError, ChainExecutionContext,
 };
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "unit_tests/chain_tests.rs"]
 mod chain_tests;
 

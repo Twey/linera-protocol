@@ -60,7 +60,12 @@ mod implementation {
     pub fn spawn_blocking<R: Send + 'static, F: FnOnce() -> R + Send + 'static>(
         task: F,
     ) -> BlockingFuture<R> {
-        spawn(async { task() })
+        panic!("no")
+        // let (send, recv) = oneshot::channel();
+        // wasm_thread::spawn(move || {
+        //     let _ = send.send(task());
+        // });
+        // recv
     }
 }
 

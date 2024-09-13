@@ -342,10 +342,23 @@ impl TryFrom<api::Certificate> for Certificate {
     type Error = GrpcProtoConversionError;
 
     fn try_from(certificate: api::Certificate) -> Result<Self, Self::Error> {
+        let hashed_certificate_value: CertificateValue = bincode::deserialize(&certificate.value).map_err(|e| {
+            panic!("Error deserializing value (error: {e}): {:?}", certificate.value);
+            e
+        })?;
+
+        let hash = linera_base::crypto::CryptoHash::new(&hashed_certificate_value);
+
         Ok(Certificate::new(
-            bincode::deserialize(&certificate.value)?,
-            bincode::deserialize(&certificate.round)?,
-            bincode::deserialize(&certificate.signatures)?,
+            hashed_certificate_value.with_hash_checked(hash).unwrap(),
+            bincode::deserialize(&certificate.round).map_err(|e| {
+                panic!("Error deserializing round {:?}", certificate.round);
+                e
+            })?,
+            bincode::deserialize(&certificate.signatures).map_err(|e| {
+                panic!("Error deserializing signatures {:?}", certificate.signatures);
+                e
+            })?,
         ))
     }
 }

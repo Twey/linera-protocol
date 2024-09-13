@@ -69,6 +69,9 @@ tonic-health = { workspace = true, optional = true }
 tonic-reflection = { workspace = true, optional = true }
 tower.workspace = true
 tracing.workspace = true
+# wasm-bindgen-test.workspace = true
+serde-reflection = "*"
+serde_json = "*"
 
 [dev-dependencies]
 insta = { workspace = true, features = ["yaml"] }
