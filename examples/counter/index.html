@@ -86,6 +86,7 @@
 
           async function updateCount() {
               const response = await counter.query('{ "query": "query { value }" }');
+              console.debug({ response });
               document.getElementById('count').innerText
                   = JSON.parse(response).data.value;
           }

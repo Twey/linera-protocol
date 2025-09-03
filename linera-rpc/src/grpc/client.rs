@@ -113,11 +113,14 @@ impl GrpcClient {
             match f(self.client.clone(), Request::new(request_inner.clone())).await {
                 Err(s) if Self::is_retryable(&s) && retry_count < self.max_retries => {
                     let delay = self.retry_delay.saturating_mul(retry_count);
+                    tracing::debug!(error = ?s, retry_count, ?delay, max_retries = self.max_retries, "got retryable error, retrying after delay");
                     retry_count += 1;
                     linera_base::time::timer::sleep(delay).await;
+                    tracing::debug!(error = ?s, retry_count = retry_count - 1, ?delay, max_retries = self.max_retries, "retryable error delay elapsed, retrying");
                     continue;
                 }
                 Err(s) => {
+                    tracing::warn!(error = ?s, retry_count, max_retries = self.max_retries, "got non-retryable error or exhausted retry count");
                     return Err(NodeError::GrpcError {
                         error: format!("remote request [{handler}] failed with status: {s:?}"),
                     });
@@ -175,13 +178,19 @@ macro_rules! client_delegate {
             request = ?$req,
             "sending gRPC request"
         );
-        $self
+        let response = $self
             .delegate(
                 |mut client, req| async move { client.$handler(req).await },
                 $req,
                 stringify!($handler),
             )
-            .await
+            .await;
+        debug!(
+            handler = stringify!($handler),
+            response = ?response,
+            "received gRPC response"
+        );
+        response
     }};
 }
 

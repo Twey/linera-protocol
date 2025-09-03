@@ -21,6 +21,7 @@
     git
     wasm-bindgen-cli
     pnpm
+    jq
   ];
   checkInputs = with pkgs; [
     jq

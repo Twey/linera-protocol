@@ -14,8 +14,10 @@ pub fn init() {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer()
-                .with_ansi(false)
+                .json()
                 .without_time()
+            // .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NEW | tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+                .with_span_events(tracing_subscriber::fmt::format::FmtSpan::FULL)
                 .with_writer(tracing_web::MakeWebConsoleWriter::new()),
         )
         .with(
